@@ -1,0 +1,15 @@
+[Unit]
+Description=Garmin LiveTrack Email to Telegram Watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dietpi/.codex/skills/send-to-telegram
+ExecStart=/usr/bin/env python3 /home/dietpi/.codex/skills/send-to-telegram/scripts/livetrack_watcher.py
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/dietpi/.codex/skills/send-to-telegram/.env
+
+[Install]
+WantedBy=multi-user.target
