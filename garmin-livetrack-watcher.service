@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/dietpi/.codex/skills/send-to-telegram
-ExecStart=/usr/bin/env python3 /home/dietpi/.codex/skills/send-to-telegram/scripts/livetrack_watcher.py
+WorkingDirectory=/home/dietpi/garminlivetrack-watcher
+ExecStart=/usr/bin/env python3 /home/dietpi/garminlivetrack-watcher/scripts/livetrack_watcher.py
 Restart=always
 RestartSec=5
-EnvironmentFile=/home/dietpi/.codex/skills/send-to-telegram/.env
+EnvironmentFile=/home/dietpi/garminlivetrack-watcher/.env
 
 [Install]
 WantedBy=multi-user.target
