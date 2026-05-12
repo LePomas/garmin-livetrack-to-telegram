@@ -1,10 +1,20 @@
 # Garmin LiveTrack Watcher
 
 Standalone systemd-managed watcher that forwards Garmin LiveTrack emails to Telegram.
+Delivery mode is broadcast: each LiveTrack message is sent to every configured recipient.
 
 ## Service
 - Unit name: `garmin-livetrack-watcher.service`
 - Boot target: `multi-user.target`
+
+## Configuration
+- Primary recipients variable: `TELEGRAM_CHAT_IDS` (comma-separated chat IDs).
+- Optional aliases for logs: `TELEGRAM_RECIPIENT_ALIASES` as `chat_id=alias` pairs.
+- Backward compatibility: if `TELEGRAM_CHAT_IDS` is not set, watcher falls back to `TELEGRAM_CHAT_ID`.
+- Current known chat IDs:
+  - `-814365864` (`sniperimp_monkeys`)
+  - `-1001440633951` (`family`)
+  - `7748310522` (`ana`, once confirmed from updates)
 
 ## Rollback (single-step)
 1. `sudo systemctl stop garmin-livetrack-watcher.service`

@@ -51,7 +51,8 @@ class Config:
     imap_user: str
     imap_password: str
     telegram_bot_token: str
-    telegram_chat_id: str
+    telegram_chat_ids: list[str]
+    telegram_recipient_aliases: dict[str, str]
     poll_seconds: int
     state_path: Path
     log_level: str
@@ -66,7 +67,8 @@ class Config:
             imap_user=require_env("IMAP_USER"),
             imap_password=require_env("IMAP_APP_PASSWORD"),
             telegram_bot_token=require_env("TELEGRAM_BOT_TOKEN"),
-            telegram_chat_id=require_env("TELEGRAM_CHAT_ID"),
+            telegram_chat_ids=parse_chat_ids(),
+            telegram_recipient_aliases=parse_chat_aliases(),
             poll_seconds=max(10, int(os.environ.get("POLL_SECONDS", "30"))),
             state_path=Path(os.environ.get("STATE_PATH", str(DEFAULT_STATE_PATH))).expanduser(),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -78,6 +80,32 @@ def require_env(key: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {key}")
     return value
+
+
+def parse_chat_ids() -> list[str]:
+    raw = os.environ.get("TELEGRAM_CHAT_IDS", "").strip()
+    if raw:
+        chat_ids = [item.strip() for item in raw.split(",") if item.strip()]
+        if chat_ids:
+            return chat_ids
+    return [require_env("TELEGRAM_CHAT_ID")]
+
+
+def parse_chat_aliases() -> dict[str, str]:
+    raw = os.environ.get("TELEGRAM_RECIPIENT_ALIASES", "").strip()
+    if not raw:
+        return {}
+    aliases: dict[str, str] = {}
+    for item in raw.split(","):
+        entry = item.strip()
+        if not entry or "=" not in entry:
+            continue
+        chat_id, alias = entry.split("=", 1)
+        chat_id = chat_id.strip()
+        alias = alias.strip()
+        if chat_id and alias:
+            aliases[chat_id] = alias
+    return aliases
 
 
 class StateStore:
@@ -217,10 +245,26 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
         subject = (msg.get("Subject") or "Garmin LiveTrack").strip()
         dt = datetime.now(timezone.utc).isoformat()
         text = build_telegram_message(link=link, subject=subject, received_at=dt)
-        post_to_telegram(config.telegram_bot_token, config.telegram_chat_id, text)
+        errors: list[str] = []
+        sent_recipients = 0
+        for chat_id in config.telegram_chat_ids:
+            alias = config.telegram_recipient_aliases.get(chat_id, chat_id)
+            try:
+                post_to_telegram(config.telegram_bot_token, chat_id, text)
+                sent_recipients += 1
+                LOG.info("Delivered LiveTrack message %s to %s", message_id, alias)
+            except (urllib.error.URLError, RuntimeError, OSError) as exc:
+                errors.append(f"{alias}: {exc}")
+                LOG.warning("Failed to deliver LiveTrack message %s to %s: %s", message_id, alias, exc)
+        if errors:
+            raise RuntimeError(
+                f"Failed Telegram delivery for message {message_id}; "
+                f"sent={sent_recipients}/{len(config.telegram_chat_ids)}; "
+                f"errors={'; '.join(errors)}"
+            )
         state.add(message_id)
         sent_count += 1
-        LOG.info("Forwarded LiveTrack message %s", message_id)
+        LOG.info("Forwarded LiveTrack message %s to %d recipients", message_id, sent_recipients)
     return sent_count
 
 
