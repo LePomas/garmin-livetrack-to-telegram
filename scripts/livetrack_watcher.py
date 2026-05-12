@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from email.message import Message
 from pathlib import Path
 
@@ -223,14 +223,15 @@ def post_to_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError("Telegram API returned non-ok response")
 
 
-def build_telegram_message(link: str, subject: str, received_at: str) -> str:
+def build_telegram_message(link: str, subject: str, received_at: datetime) -> str:
     subject_escaped = escape_markdown_v2(subject)
-    received_escaped = escape_markdown_v2(received_at)
+    time_text = escape_markdown_v2(received_at.strftime("%H:%M"))
+    date_text = escape_markdown_v2(received_at.strftime("%d/%m/%Y"))
     link_escaped = escape_markdown_v2(link)
     return (
         "📍 *Garmin LiveTrack Alert*\n\n"
-        f"🚴 *Title:* {subject_escaped}\n"
-        f"🕒 *Time:* `{received_escaped}`\n"
+        f"🚴 {subject_escaped} 🏃\n"
+        f"🕒 *Time:* {time_text} 📅 *Date:* {date_text}\n"
         f"🔗 *Link:* {link_escaped}\n\n"
         "_🔥 Keep an eye on the route\\!_"
     )
@@ -265,7 +266,7 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
             state.add(message_id)
             continue
         subject = (msg.get("Subject") or "Garmin LiveTrack").strip()
-        dt = datetime.now(timezone.utc).isoformat()
+        dt = datetime.now().astimezone()
         text = build_telegram_message(link=link, subject=subject, received_at=dt)
         errors: list[str] = []
         sent_recipients = 0
