@@ -16,3 +16,7 @@ Standalone systemd-managed watcher that forwards Garmin LiveTrack emails to Tele
 ## Notes
 - Keep `.env` local to this repo.
 - State file is persisted at `state/livetrack_state.json`.
+
+## Migration
+- `.env` was copied from the former skill path to this repo.
+- `state/livetrack_state.json` was migrated from the former skill state path to preserve dedupe.
