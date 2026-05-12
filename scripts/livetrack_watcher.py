@@ -213,7 +213,9 @@ def fetch_message(conn: imaplib.IMAP4_SSL, msg_id: str) -> Message | None:
 
 def post_to_telegram(token: str, chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
+    payload = urllib.parse.urlencode(
+        {"chat_id": chat_id, "text": text, "parse_mode": "MarkdownV2"}
+    ).encode("utf-8")
     request = urllib.request.Request(url=url, data=payload, method="POST")
     with urllib.request.urlopen(request, timeout=20) as response:
         body = response.read().decode("utf-8", errors="replace")
@@ -222,7 +224,27 @@ def post_to_telegram(token: str, chat_id: str, text: str) -> None:
 
 
 def build_telegram_message(link: str, subject: str, received_at: str) -> str:
-    return f"Garmin LiveTrack\n{subject}\n{received_at}\n{link}"
+    subject_escaped = escape_markdown_v2(subject)
+    received_escaped = escape_markdown_v2(received_at)
+    link_escaped = escape_markdown_v2(link)
+    return (
+        "📍 *Garmin LiveTrack Alert*\n\n"
+        f"🚴 *Title:* {subject_escaped}\n"
+        f"🕒 *Time:* `{received_escaped}`\n"
+        f"🔗 *Link:* {link_escaped}\n\n"
+        "_🔥 Keep an eye on the route\\!_"
+    )
+
+
+def escape_markdown_v2(text: str) -> str:
+    specials = r"_*[]()~`>#+-=|{}.!"
+    escaped = []
+    for ch in text:
+        if ch in specials:
+            escaped.append("\\" + ch)
+        else:
+            escaped.append(ch)
+    return "".join(escaped)
 
 
 def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: StateStore) -> int:
