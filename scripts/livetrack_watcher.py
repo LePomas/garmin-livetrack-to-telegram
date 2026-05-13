@@ -230,10 +230,10 @@ def build_telegram_message(link: str, subject: str, received_at: datetime) -> st
     link_escaped = escape_markdown_v2(link)
     return (
         "📍 *Garmin LiveTrack Alert*\n\n"
-        f"🚴 {subject_escaped} 🏃\n"
-        f"🕒 *Time:* {time_text} 📅 *Date:* {date_text}\n"
+        f"🚴 *{subject_escaped}* 🏃\n"
+        f"📅 *Date:* {date_text} \\| 🕒 *Time:* {time_text}\n"
         f"🔗 *Link:* {link_escaped}\n\n"
-        "_🔥 Keep an eye on the route\\!_"
+        "🔥 *Keep an eye on the route\\!* 🔥"
     )
 
 
