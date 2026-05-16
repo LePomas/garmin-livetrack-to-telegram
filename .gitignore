@@ -1,7 +1,6 @@
-.env
-.env.*
+# Environment variables and secrets
+.env*
 !.env.example
-.env.bak-*
 
 .venv/
 .venv-*/

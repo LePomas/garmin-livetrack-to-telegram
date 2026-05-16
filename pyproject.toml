@@ -12,9 +12,7 @@ license = "MIT"
 authors = [
     { name = "Garmin LiveTrack Watcher contributors" }
 ]
-dependencies = [
-    "git-filter-repo>=2.47.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 test = [
