@@ -1,97 +1,155 @@
 # Garmin LiveTrack Watcher
 
-Broadcast Garmin LiveTrack email alerts to Telegram recipients.
+Garmin LiveTrack Watcher polls an email inbox for Garmin LiveTrack messages and forwards the LiveTrack link to one or more Telegram chats.
 
-## 30-Second Orientation
-- Core runtime code: `scripts/livetrack_watcher.py`
-- Test suite: `tests/scripts/test_livetrack_watcher.py`
-- Shared pytest fixtures: `tests/conftest.py`
-- Systemd unit source in repo: `garmin-livetrack-watcher.service`
-- Runtime env file (local only): `.env`
-- Runtime dedupe state (local only): `state/livetrack_state.json`
+The project is intentionally small: one Python script, a systemd unit example, and unit tests with IMAP and Telegram calls mocked out.
 
-## Quick Start
-1. Run tests:
+## Features
+
+- Watches unread IMAP messages for Garmin LiveTrack alerts.
+- Extracts LiveTrack URLs from plain text or HTML email bodies.
+- Sends MarkdownV2-formatted Telegram messages to one or more chat IDs.
+- Stores processed email `Message-ID` values in a local state file to reduce duplicate alerts.
+- Can run once for smoke testing or continuously as a long-running service.
+
+## Requirements
+
+- Python 3.10 or newer.
+- An IMAP mailbox that receives Garmin LiveTrack emails.
+- Telegram bot token and target chat ID or IDs.
+- `systemd` only if you want the included service setup.
+
+The runtime script uses only the Python standard library. `pytest` is needed only for tests.
+
+## Installation
+
+Clone the repo and create a virtual environment:
+
 ```bash
-./.venv-tests/bin/pytest -q
-```
-2. Restart service after file changes:
-```bash
-sudo systemctl restart garmin-livetrack-watcher.service
-```
-3. Check health:
-```bash
-sudo systemctl status garmin-livetrack-watcher.service --no-pager
-sudo journalctl -u garmin-livetrack-watcher.service -n 80 --no-pager
+git clone https://github.com/your-user/garmin-livetrack-watcher.git
+cd garmin-livetrack-watcher
+python3 -m venv .venv
+./.venv/bin/python -m pip install -U pip
+./.venv/bin/python -m pip install ".[test]"
 ```
 
-## Repo Map
-- `scripts/livetrack_watcher.py`: IMAP polling, Garmin detection, Telegram delivery, message formatting, dedupe state.
-- `tests/scripts/test_livetrack_watcher.py`: isolated unit tests with mocks.
-- `tests/conftest.py`: reusable fixtures (sample message, env helpers, module loader).
-- `garmin-livetrack-watcher.service`: systemd unit template for this project.
-- `.env.example`: config template.
+Create a local config file:
 
-## Runtime Flow (Narrow Dependency Map)
-1. Connect to IMAP (`connect_imap`).
-2. Search unseen messages (`fetch_message_ids`).
-3. Load message + detect Garmin LiveTrack (`fetch_message`, `is_garmin_livetrack`).
-4. Extract track URL (`extract_livetrack_link_from_message`).
-5. Build Telegram text (`build_telegram_message`, `escape_markdown_v2`).
-6. Broadcast to all recipients (`post_to_telegram`).
-7. Persist processed Message-ID (`StateStore`) to prevent duplicates.
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your mailbox and Telegram settings. Do not commit `.env`.
 
 ## Configuration
-Primary variables:
-- `TELEGRAM_BOT_TOKEN`: bot token.
-- `TELEGRAM_CHAT_IDS`: comma-separated recipient chat IDs (broadcast target list).
-- `TELEGRAM_RECIPIENT_ALIASES`: optional `chat_id=alias` pairs for logs.
-- `IMAP_USER`, `IMAP_APP_PASSWORD`: mailbox credentials.
 
-Additional variables:
-- `IMAP_HOST` (default `imap.gmail.com`)
-- `IMAP_PORT` (default `993`)
-- `POLL_SECONDS` (minimum `10`, default `30`)
-- `LOG_LEVEL` (default `INFO`)
-- `STATE_PATH` (optional override)
+Required variables:
 
-Compatibility:
-- If `TELEGRAM_CHAT_IDS` is missing/empty, watcher falls back to legacy `TELEGRAM_CHAT_ID`.
+- `TELEGRAM_BOT_TOKEN`: Telegram bot token from BotFather.
+- `TELEGRAM_CHAT_IDS`: comma-separated Telegram chat IDs to receive alerts.
+- `IMAP_USER`: mailbox username.
+- `IMAP_APP_PASSWORD`: mailbox password or app password.
 
-## Common Tasks
-Run tests:
+Optional variables:
+
+- `TELEGRAM_RECIPIENT_ALIASES`: comma-separated `chat_id=alias` pairs used only in logs.
+- `TELEGRAM_CHAT_ID`: legacy single-recipient fallback if `TELEGRAM_CHAT_IDS` is unset.
+- `IMAP_HOST`: defaults to `imap.gmail.com`.
+- `IMAP_PORT`: defaults to `993`.
+- `POLL_SECONDS`: polling interval, minimum `10`, default `30`.
+- `LOG_LEVEL`: Python logging level, default `INFO`.
+- `STATE_PATH`: custom dedupe state path. Defaults to `state/livetrack_state.json`.
+
+For Gmail, enable IMAP and use an app password rather than your account password.
+
+## Usage
+
+Run one scan and exit:
+
 ```bash
-./.venv-tests/bin/pytest -q
+./.venv/bin/python scripts/livetrack_watcher.py --once
 ```
 
-Restart service (required after project file edits):
+Run continuously:
+
 ```bash
-sudo systemctl restart garmin-livetrack-watcher.service
+./.venv/bin/python scripts/livetrack_watcher.py
 ```
 
-Install/update unit file from repo copy:
+The script loads `.env` from the repository root if it exists. Existing environment variables take precedence because `.env` values are loaded with `setdefault`.
+
+## Running As A Service
+
+The repo includes `garmin-livetrack-watcher.service` as a systemd example. It contains local paths and must be edited before installing on another machine.
+
+After adjusting `WorkingDirectory`, `ExecStart`, and `EnvironmentFile`, install it with:
+
 ```bash
 sudo install -m 0644 garmin-livetrack-watcher.service /etc/systemd/system/garmin-livetrack-watcher.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now garmin-livetrack-watcher.service
 ```
 
+Check service health:
+
+```bash
+sudo systemctl status garmin-livetrack-watcher.service --no-pager
+sudo journalctl -u garmin-livetrack-watcher.service -n 80 --no-pager
+```
+
+Restart after project file changes:
+
+```bash
+sudo systemctl restart garmin-livetrack-watcher.service
+```
+
+## Tests
+
+Run the test suite:
+
+```bash
+./.venv/bin/python -m pytest -q
+```
+
+Tests are unit-level and mock network boundaries. They do not connect to IMAP or Telegram.
+
 ## Troubleshooting
-`service active but no alerts`:
-- verify `.env` token/chat IDs and IMAP credentials
-- check logs for IMAP auth or Telegram API failures
 
-`duplicate alerts`:
-- verify `state/livetrack_state.json` is writable
-- avoid clearing state file unless intentional
+Service is active but no alerts arrive:
 
-`tests fail locally`:
-- ensure `pytest` exists in `./.venv-tests`
-- run exactly: `./.venv-tests/bin/pytest -q`
+- Confirm Garmin emails are arriving unread in the configured inbox.
+- Check `.env` values for bot token, chat IDs, and IMAP credentials.
+- Inspect logs with `journalctl` for IMAP authentication or Telegram API errors.
 
-## Rollback (Git)
-1. `sudo systemctl stop garmin-livetrack-watcher.service`
-2. `git checkout <known-good-commit-or-tag>`
-3. `sudo install -m 0644 garmin-livetrack-watcher.service /etc/systemd/system/garmin-livetrack-watcher.service`
-4. `sudo systemctl daemon-reload`
-5. `sudo systemctl enable --now garmin-livetrack-watcher.service`
+Duplicate alerts:
+
+- Confirm the state file path is writable by the service user.
+- Avoid deleting `state/livetrack_state.json` unless you intentionally want to reprocess messages.
+
+Telegram formatting errors:
+
+- Check logs for Telegram API responses.
+- The script sends with MarkdownV2 and escapes message fields before posting.
+
+Tests fail locally:
+
+- Reinstall test dependencies with `./.venv/bin/python -m pip install ".[test]"`.
+- Run from the repository root.
+
+## Limitations
+
+- The watcher searches unread messages only.
+- Detection is tuned for Garmin sender and LiveTrack subject hints.
+- Telegram delivery is best-effort per polling cycle; partial recipient failures raise an error so the message can be retried.
+- The project does not include OAuth setup for email providers.
+
+## Security And Privacy
+
+- Never commit `.env`, mailbox credentials, Telegram bot tokens, chat IDs, or state files.
+- `.env.example` uses placeholders only.
+- `state/livetrack_state.json` may contain email message IDs and is ignored by Git.
+- Logs can include recipient aliases and message IDs. Use non-sensitive aliases.
+
+## License
+
+MIT. See `LICENSE`.
