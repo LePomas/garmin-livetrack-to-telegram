@@ -323,6 +323,64 @@ def test_post_to_telegram_raises_on_non_ok_response(watcher_module):
     assert str(error) == "Telegram API returned non-ok response"
 
 
+def test_fetch_telegram_updates_reads_result_and_offset(watcher_module):
+    # Arrange
+    response = Mock()
+    response.read.return_value = b'{"ok":true,"result":[{"update_id":7}]}'
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+
+    # Act
+    with patch.object(watcher_module.urllib.request, "urlopen", return_value=response):
+        updates = watcher_module.fetch_telegram_updates("token", 4)
+        request_url = watcher_module.urllib.request.urlopen.call_args[0][0].full_url
+
+    # Assert
+    assert updates == [{"update_id": 7}]
+    assert "offset=4" in request_url
+
+
+def test_fetch_telegram_updates_raises_on_non_ok_response(watcher_module):
+    # Arrange
+    response = Mock()
+    response.read.return_value = b'{"ok":false}'
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+
+    # Act
+    error = None
+    with patch.object(watcher_module.urllib.request, "urlopen", return_value=response):
+        try:
+            watcher_module.fetch_telegram_updates("token", None)
+        except RuntimeError as exc:
+            error = exc
+
+    # Assert
+    assert str(error) == "Telegram getUpdates returned non-ok response"
+
+
+def test_parse_telegram_command_accepts_bot_suffix(watcher_module):
+    # Arrange
+    text = "/disable@GarminBot please"
+
+    # Act
+    command = watcher_module.parse_telegram_command(text)
+
+    # Assert
+    assert command == "/disable"
+
+
+def test_parse_telegram_command_ignores_regular_text(watcher_module):
+    # Arrange
+    text = "disable"
+
+    # Act
+    command = watcher_module.parse_telegram_command(text)
+
+    # Assert
+    assert command is None
+
+
 def test_state_store_loads_and_trims_existing_state(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
@@ -338,6 +396,28 @@ def test_state_store_loads_and_trims_existing_state(watcher_module, tmp_path):
     assert state.message_ids == ["2", "3"]
 
 
+def test_state_store_loads_disabled_chats_and_update_offset(watcher_module, tmp_path):
+    # Arrange
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "processed_message_ids": ["1"],
+                "disabled_chat_ids": ["-1", 2],
+                "telegram_update_offset": 9,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Act
+    state = watcher_module.StateStore(state_path)
+
+    # Assert
+    assert state.disabled_chat_ids == ["-1", "2"]
+    assert state.telegram_update_offset == 9
+
+
 def test_state_store_ignores_unreadable_json(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
@@ -350,6 +430,22 @@ def test_state_store_ignores_unreadable_json(watcher_module, tmp_path):
     assert state.message_ids == []
 
 
+def test_state_store_disable_enable_and_update_offset_persist(watcher_module, tmp_path):
+    # Arrange
+    state_path = tmp_path / "state.json"
+    state = watcher_module.StateStore(state_path)
+
+    # Act
+    state.disable_chat("-1")
+    state.set_telegram_update_offset(12)
+    state.enable_chat("-1")
+    reloaded = watcher_module.StateStore(state_path)
+
+    # Assert
+    assert reloaded.disabled_chat_ids == []
+    assert reloaded.telegram_update_offset == 12
+
+
 def test_state_store_add_ignores_duplicate_message_id(watcher_module, tmp_path):
     # Arrange
     state = watcher_module.StateStore(tmp_path / "state.json")
@@ -360,6 +456,108 @@ def test_state_store_add_ignores_duplicate_message_id(watcher_module, tmp_path):
 
     # Assert
     assert state.message_ids == ["message-1"]
+
+
+def test_process_telegram_commands_disables_configured_chat(watcher_module, tmp_path):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    updates = [{"update_id": 5, "message": {"text": "/disable", "chat": {"id": -1}}}]
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert state.disabled_chat_ids == ["-1"]
+    assert state.telegram_update_offset == 6
+
+
+def test_process_telegram_commands_enables_configured_chat(watcher_module, tmp_path):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    state.disable_chat("-1")
+    updates = [{"update_id": 6, "message": {"text": "/enable@GarminBot", "chat": {"id": -1}}}]
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert state.disabled_chat_ids == []
+
+
+def test_process_telegram_commands_ignores_unknown_chat(watcher_module, tmp_path):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    updates = [{"update_id": 7, "message": {"text": "/disable", "chat": {"id": -2}}}]
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert state.disabled_chat_ids == []
+
+
+def test_process_telegram_commands_ignores_non_command_message(watcher_module, tmp_path):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    updates = [{"update_id": 8, "message": {"text": "hello", "chat": {"id": -1}}}]
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert state.disabled_chat_ids == []
 
 
 def test_fetch_message_ids_returns_empty_on_search_failure(watcher_module):
@@ -450,6 +648,65 @@ def test_process_unseen_messages_broadcasts_all_recipients(watcher_module, sampl
 
     # Assert
     assert sent_to == ["-1", "-2", "3"]
+
+
+def test_process_unseen_messages_skips_disabled_recipient(watcher_module, sample_message, tmp_path):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1", "-2"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    state.disable_chat("-1")
+    sent_to = []
+
+    # Act
+    with patch.object(watcher_module, "fetch_message_ids", return_value=["1"]):
+        with patch.object(watcher_module, "fetch_message", return_value=sample_message):
+            with patch.object(watcher_module, "post_to_telegram", side_effect=lambda _t, c, _m: sent_to.append(c)):
+                watcher_module.process_unseen_messages(Mock(), config, state)
+
+    # Assert
+    assert sent_to == ["-2"]
+
+
+def test_process_unseen_messages_marks_seen_when_all_recipients_disabled(
+    watcher_module, sample_message, tmp_path
+):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    state.disable_chat("-1")
+
+    # Act
+    with patch.object(watcher_module, "fetch_message_ids", return_value=["1"]):
+        with patch.object(watcher_module, "fetch_message", return_value=sample_message):
+            with patch.object(watcher_module, "post_to_telegram") as post_to_telegram:
+                sent_count = watcher_module.process_unseen_messages(Mock(), config, state)
+
+    # Assert
+    assert sent_count == 0
+    assert state.seen("<test-message-id>") is True
+    post_to_telegram.assert_not_called()
 
 
 def test_process_unseen_messages_marks_seen_message_in_state(watcher_module, sample_message, tmp_path):
@@ -716,9 +973,10 @@ def test_run_loop_processes_once_then_logs_out(watcher_module, tmp_path):
     # Act
     with patch.object(watcher_module.signal, "signal", side_effect=remember_handler):
         with patch.object(watcher_module, "connect_imap", return_value=conn):
-            with patch.object(watcher_module, "process_unseen_messages", return_value=0):
-                with patch.object(watcher_module.time, "sleep", side_effect=stop_after_sleep):
-                    watcher_module.run_loop(config)
+            with patch.object(watcher_module, "process_telegram_commands", return_value=None):
+                with patch.object(watcher_module, "process_unseen_messages", return_value=0):
+                    with patch.object(watcher_module.time, "sleep", side_effect=stop_after_sleep):
+                        watcher_module.run_loop(config)
 
     # Assert
     conn.noop.assert_called_once_with()
@@ -759,8 +1017,9 @@ def test_main_once_mode_returns_zero(watcher_module):
             with patch.object(watcher_module, "connect_imap") as connect_imap:
                 conn = Mock()
                 connect_imap.return_value = conn
-                with patch.object(watcher_module, "process_unseen_messages", return_value=0):
-                    result = watcher_module.main()
+                with patch.object(watcher_module, "process_telegram_commands", return_value=None):
+                    with patch.object(watcher_module, "process_unseen_messages", return_value=0):
+                        result = watcher_module.main()
 
     # Assert
     assert result == 0

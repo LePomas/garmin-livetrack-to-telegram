@@ -9,6 +9,7 @@ The project is intentionally small: one Python script, a systemd unit example, a
 - Watches unread IMAP messages for Garmin LiveTrack alerts.
 - Extracts LiveTrack URLs from plain text or HTML email bodies.
 - Sends MarkdownV2-formatted Telegram messages to one or more chat IDs.
+- Lets configured Telegram chats pause alerts with `/disable` and resume them with `/enable`.
 - Stores processed email `Message-ID` values in a local state file to reduce duplicate alerts.
 - Can run once for smoke testing or continuously as a long-running service.
 
@@ -78,6 +79,8 @@ Run continuously:
 
 The script loads `.env` from the repository root if it exists. Existing environment variables take precedence because `.env` values are loaded with `setdefault`.
 
+Configured Telegram recipients can send `/disable` to the bot to stop receiving LiveTrack alerts, then `/enable` to resume them. Commands only affect the chat that sent the command, and chats not listed in `TELEGRAM_CHAT_IDS` are ignored.
+
 ## Running As A Service
 
 The repo includes `garmin-livetrack-watcher.service` as a systemd example. It contains local paths and must be edited before installing on another machine.
@@ -125,6 +128,7 @@ Duplicate alerts:
 
 - Confirm the state file path is writable by the service user.
 - Avoid deleting `state/livetrack_state.json` unless you intentionally want to reprocess messages.
+- The same state file also stores disabled Telegram recipients and the Telegram update offset.
 
 Telegram formatting errors:
 

@@ -113,6 +113,8 @@ class StateStore:
         self.path = path
         self.max_entries = max_entries
         self.message_ids: list[str] = []
+        self.disabled_chat_ids: list[str] = []
+        self.telegram_update_offset: int | None = None
         self._load()
 
     def _load(self) -> None:
@@ -123,8 +125,23 @@ class StateStore:
             items = data.get("processed_message_ids", [])
             if isinstance(items, list):
                 self.message_ids = [str(x) for x in items][-self.max_entries :]
+            disabled = data.get("disabled_chat_ids", [])
+            if isinstance(disabled, list):
+                self.disabled_chat_ids = [str(x) for x in disabled]
+            offset = data.get("telegram_update_offset")
+            if isinstance(offset, int):
+                self.telegram_update_offset = offset
         except (json.JSONDecodeError, OSError):
             LOG.warning("State file unreadable; starting fresh: %s", self.path)
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "processed_message_ids": self.message_ids,
+            "disabled_chat_ids": self.disabled_chat_ids,
+            "telegram_update_offset": self.telegram_update_offset,
+        }
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def seen(self, message_id: str) -> bool:
         return message_id in self.message_ids
@@ -134,9 +151,25 @@ class StateStore:
             return
         self.message_ids.append(message_id)
         self.message_ids = self.message_ids[-self.max_entries :]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"processed_message_ids": self.message_ids}
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._save()
+
+    def disable_chat(self, chat_id: str) -> None:
+        if chat_id in self.disabled_chat_ids:
+            return
+        self.disabled_chat_ids.append(chat_id)
+        self._save()
+
+    def enable_chat(self, chat_id: str) -> None:
+        if chat_id not in self.disabled_chat_ids:
+            return
+        self.disabled_chat_ids = [item for item in self.disabled_chat_ids if item != chat_id]
+        self._save()
+
+    def set_telegram_update_offset(self, offset: int) -> None:
+        if self.telegram_update_offset == offset:
+            return
+        self.telegram_update_offset = offset
+        self._save()
 
 
 def is_garmin_livetrack(msg: Message) -> bool:
@@ -223,6 +256,65 @@ def post_to_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError("Telegram API returned non-ok response")
 
 
+def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, object]]:
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params: dict[str, str] = {
+        "timeout": "0",
+        "allowed_updates": json.dumps(["message"]),
+    }
+    if offset is not None:
+        params["offset"] = str(offset)
+    request_url = f"{url}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url=request_url, method="GET")
+    with urllib.request.urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    payload = json.loads(body)
+    if not payload.get("ok"):
+        raise RuntimeError("Telegram getUpdates returned non-ok response")
+    updates = payload.get("result", [])
+    if not isinstance(updates, list):
+        return []
+    return [update for update in updates if isinstance(update, dict)]
+
+
+def parse_telegram_command(text: str) -> str | None:
+    first_token = text.strip().split(maxsplit=1)[0] if text.strip() else ""
+    command = first_token.split("@", 1)[0].lower()
+    if command in {"/disable", "/enable"}:
+        return command
+    return None
+
+
+def process_telegram_commands(config: Config, state: StateStore) -> None:
+    updates = fetch_telegram_updates(config.telegram_bot_token, state.telegram_update_offset)
+    allowed_chat_ids = set(config.telegram_chat_ids)
+    for update in updates:
+        update_id = update.get("update_id")
+        if isinstance(update_id, int):
+            state.set_telegram_update_offset(update_id + 1)
+
+        message = update.get("message")
+        if not isinstance(message, dict):
+            continue
+        text = message.get("text")
+        chat = message.get("chat")
+        if not isinstance(text, str) or not isinstance(chat, dict):
+            continue
+        chat_id_raw = chat.get("id")
+        if chat_id_raw is None:
+            continue
+        chat_id = str(chat_id_raw)
+        if chat_id not in allowed_chat_ids:
+            continue
+        command = parse_telegram_command(text)
+        if command == "/disable":
+            state.disable_chat(chat_id)
+            LOG.info("Disabled Telegram recipient %s", config.telegram_recipient_aliases.get(chat_id, chat_id))
+        elif command == "/enable":
+            state.enable_chat(chat_id)
+            LOG.info("Enabled Telegram recipient %s", config.telegram_recipient_aliases.get(chat_id, chat_id))
+
+
 def build_telegram_message(link: str, subject: str, received_at: datetime) -> str:
     subject_escaped = escape_markdown_v2(subject)
     time_text = escape_markdown_v2(received_at.strftime("%H:%M"))
@@ -270,7 +362,14 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
         text = build_telegram_message(link=link, subject=subject, received_at=dt)
         errors: list[str] = []
         sent_recipients = 0
-        for chat_id in config.telegram_chat_ids:
+        active_chat_ids = [
+            chat_id for chat_id in config.telegram_chat_ids if chat_id not in state.disabled_chat_ids
+        ]
+        if not active_chat_ids:
+            LOG.info("No active Telegram recipients for LiveTrack message %s", message_id)
+            state.add(message_id)
+            continue
+        for chat_id in active_chat_ids:
             alias = config.telegram_recipient_aliases.get(chat_id, chat_id)
             try:
                 post_to_telegram(config.telegram_bot_token, chat_id, text)
@@ -282,7 +381,7 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
         if errors:
             raise RuntimeError(
                 f"Failed Telegram delivery for message {message_id}; "
-                f"sent={sent_recipients}/{len(config.telegram_chat_ids)}; "
+                f"sent={sent_recipients}/{len(active_chat_ids)}; "
                 f"errors={'; '.join(errors)}"
             )
         state.add(message_id)
@@ -318,6 +417,7 @@ def run_loop(config: Config) -> None:
             if conn is None:
                 conn = connect_imap(config)
                 LOG.info("Connected to IMAP server %s", config.imap_host)
+            process_telegram_commands(config, state)
             sent = process_unseen_messages(conn, config, state)
             LOG.debug("Scan complete; forwarded=%d", sent)
             time.sleep(config.poll_seconds)
@@ -360,6 +460,7 @@ def main() -> int:
         conn = connect_imap(config)
         try:
             state = StateStore(config.state_path)
+            process_telegram_commands(config, state)
             process_unseen_messages(conn, config, state)
         finally:
             conn.logout()
