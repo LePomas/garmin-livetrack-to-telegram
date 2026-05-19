@@ -50,6 +50,7 @@ def clear_watcher_env(monkeypatch):
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
         "TELEGRAM_CHAT_IDS",
+        "TELEGRAM_ADMIN_CHAT_IDS",
         "TELEGRAM_RECIPIENT_ALIASES",
         "POLL_SECONDS",
         "STATE_PATH",

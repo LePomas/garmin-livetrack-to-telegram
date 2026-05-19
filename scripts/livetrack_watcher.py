@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import Message
 from pathlib import Path
@@ -56,6 +56,7 @@ class Config:
     poll_seconds: int
     state_path: Path
     log_level: str
+    telegram_admin_chat_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -72,6 +73,7 @@ class Config:
             poll_seconds=max(10, int(os.environ.get("POLL_SECONDS", "30"))),
             state_path=Path(os.environ.get("STATE_PATH", str(DEFAULT_STATE_PATH))).expanduser(),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+            telegram_admin_chat_ids=parse_admin_chat_ids(),
         )
 
 
@@ -85,10 +87,18 @@ def require_env(key: str) -> str:
 def parse_chat_ids() -> list[str]:
     raw = os.environ.get("TELEGRAM_CHAT_IDS", "").strip()
     if raw:
-        chat_ids = [item.strip() for item in raw.split(",") if item.strip()]
+        chat_ids = parse_comma_separated_ids(raw)
         if chat_ids:
             return chat_ids
     return [require_env("TELEGRAM_CHAT_ID")]
+
+
+def parse_admin_chat_ids() -> list[str]:
+    return parse_comma_separated_ids(os.environ.get("TELEGRAM_ADMIN_CHAT_IDS", ""))
+
+
+def parse_comma_separated_ids(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def parse_chat_aliases() -> dict[str, str]:
@@ -114,6 +124,7 @@ class StateStore:
         self.max_entries = max_entries
         self.message_ids: list[str] = []
         self.disabled_chat_ids: list[str] = []
+        self.pending_subscription_requests: list[dict[str, str]] = []
         self.telegram_update_offset: int | None = None
         self._load()
 
@@ -128,6 +139,17 @@ class StateStore:
             disabled = data.get("disabled_chat_ids", [])
             if isinstance(disabled, list):
                 self.disabled_chat_ids = [str(x) for x in disabled]
+            requests = data.get("pending_subscription_requests", [])
+            if isinstance(requests, list):
+                self.pending_subscription_requests = [
+                    {
+                        "chat_id": str(item["chat_id"]),
+                        "chat_label": str(item.get("chat_label", "")),
+                        "requested_at": str(item.get("requested_at", "")),
+                    }
+                    for item in requests
+                    if isinstance(item, dict) and item.get("chat_id") is not None
+                ]
             offset = data.get("telegram_update_offset")
             if isinstance(offset, int):
                 self.telegram_update_offset = offset
@@ -139,6 +161,7 @@ class StateStore:
         payload = {
             "processed_message_ids": self.message_ids,
             "disabled_chat_ids": self.disabled_chat_ids,
+            "pending_subscription_requests": self.pending_subscription_requests,
             "telegram_update_offset": self.telegram_update_offset,
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -170,6 +193,24 @@ class StateStore:
             return
         self.telegram_update_offset = offset
         self._save()
+
+    def has_pending_subscription_request(self, chat_id: str) -> bool:
+        return any(item.get("chat_id") == chat_id for item in self.pending_subscription_requests)
+
+    def add_pending_subscription_request(
+        self, chat_id: str, chat_label: str, requested_at: datetime
+    ) -> bool:
+        if self.has_pending_subscription_request(chat_id):
+            return False
+        self.pending_subscription_requests.append(
+            {
+                "chat_id": chat_id,
+                "chat_label": chat_label,
+                "requested_at": requested_at.isoformat(),
+            }
+        )
+        self._save()
+        return True
 
 
 def is_garmin_livetrack(msg: Message) -> bool:
@@ -280,9 +321,84 @@ def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, obj
 def parse_telegram_command(text: str) -> str | None:
     first_token = text.strip().split(maxsplit=1)[0] if text.strip() else ""
     command = first_token.split("@", 1)[0].lower()
-    if command in {"/disable", "/enable"}:
+    if command in {"/disable", "/enable", "/request"}:
         return command
     return None
+
+
+def get_telegram_chat_label(chat: dict[str, object], chat_id: str) -> str:
+    title = chat.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    username = chat.get("username")
+    if isinstance(username, str) and username.strip():
+        return f"@{username.strip()}"
+    first_name = chat.get("first_name")
+    last_name = chat.get("last_name")
+    name_parts = [
+        item.strip()
+        for item in (first_name, last_name)
+        if isinstance(item, str) and item.strip()
+    ]
+    if name_parts:
+        return " ".join(name_parts)
+    return f"chat {chat_id}"
+
+
+def build_subscription_request_received_message() -> str:
+    return escape_markdown_v2(
+        "Subscription request received. An admin needs to approve this chat before LiveTrack alerts are sent."
+    )
+
+
+def build_already_subscribed_message() -> str:
+    return escape_markdown_v2("This chat is already configured for LiveTrack alerts.")
+
+
+def build_admin_subscription_request_message(chat_id: str, chat_label: str) -> str:
+    return (
+        "*New Garmin LiveTrack subscription request*\n\n"
+        f"*Chat:* {escape_markdown_v2(chat_label)}\n"
+        f"*Chat ID:* {escape_markdown_v2(chat_id)}\n\n"
+        f"{escape_markdown_v2('Add this chat ID to TELEGRAM_CHAT_IDS to approve the request.')}"
+    )
+
+
+def notify_subscription_request_admins(config: Config, chat_id: str, chat_label: str) -> None:
+    if not config.telegram_admin_chat_ids:
+        LOG.info("No Telegram admin recipients configured for subscription request from %s", chat_id)
+        return
+    text = build_admin_subscription_request_message(chat_id, chat_label)
+    for admin_chat_id in config.telegram_admin_chat_ids:
+        post_to_telegram(config.telegram_bot_token, admin_chat_id, text)
+
+
+def handle_subscription_request(
+    config: Config, state: StateStore, chat_id: str, chat: dict[str, object]
+) -> None:
+    if chat_id in set(config.telegram_chat_ids):
+        post_to_telegram(
+            config.telegram_bot_token,
+            chat_id,
+            build_already_subscribed_message(),
+        )
+        return
+
+    chat_label = get_telegram_chat_label(chat, chat_id)
+    is_new_request = not state.has_pending_subscription_request(chat_id)
+    post_to_telegram(
+        config.telegram_bot_token,
+        chat_id,
+        build_subscription_request_received_message(),
+    )
+    if is_new_request:
+        notify_subscription_request_admins(config, chat_id, chat_label)
+        state.add_pending_subscription_request(
+            chat_id=chat_id,
+            chat_label=chat_label,
+            requested_at=datetime.now().astimezone(),
+        )
+    LOG.info("Recorded Telegram subscription request from %s", chat_label)
 
 
 def process_telegram_commands(config: Config, state: StateStore) -> None:
@@ -290,29 +406,31 @@ def process_telegram_commands(config: Config, state: StateStore) -> None:
     allowed_chat_ids = set(config.telegram_chat_ids)
     for update in updates:
         update_id = update.get("update_id")
+        message = update.get("message")
+        if isinstance(message, dict):
+            text = message.get("text")
+            chat = message.get("chat")
+            if isinstance(text, str) and isinstance(chat, dict):
+                chat_id_raw = chat.get("id")
+                if chat_id_raw is not None:
+                    chat_id = str(chat_id_raw)
+                    command = parse_telegram_command(text)
+                    if command == "/request":
+                        handle_subscription_request(config, state, chat_id, chat)
+                    elif chat_id in allowed_chat_ids and command == "/disable":
+                        state.disable_chat(chat_id)
+                        LOG.info(
+                            "Disabled Telegram recipient %s",
+                            config.telegram_recipient_aliases.get(chat_id, chat_id),
+                        )
+                    elif chat_id in allowed_chat_ids and command == "/enable":
+                        state.enable_chat(chat_id)
+                        LOG.info(
+                            "Enabled Telegram recipient %s",
+                            config.telegram_recipient_aliases.get(chat_id, chat_id),
+                        )
         if isinstance(update_id, int):
             state.set_telegram_update_offset(update_id + 1)
-
-        message = update.get("message")
-        if not isinstance(message, dict):
-            continue
-        text = message.get("text")
-        chat = message.get("chat")
-        if not isinstance(text, str) or not isinstance(chat, dict):
-            continue
-        chat_id_raw = chat.get("id")
-        if chat_id_raw is None:
-            continue
-        chat_id = str(chat_id_raw)
-        if chat_id not in allowed_chat_ids:
-            continue
-        command = parse_telegram_command(text)
-        if command == "/disable":
-            state.disable_chat(chat_id)
-            LOG.info("Disabled Telegram recipient %s", config.telegram_recipient_aliases.get(chat_id, chat_id))
-        elif command == "/enable":
-            state.enable_chat(chat_id)
-            LOG.info("Enabled Telegram recipient %s", config.telegram_recipient_aliases.get(chat_id, chat_id))
 
 
 def build_telegram_message(link: str, subject: str, received_at: datetime) -> str:

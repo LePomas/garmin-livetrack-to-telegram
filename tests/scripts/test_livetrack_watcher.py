@@ -168,6 +168,7 @@ def test_config_from_env_uses_defaults_and_minimum_poll_seconds(
     monkeypatch.setenv("POLL_SECONDS", "5")
     monkeypatch.setenv("STATE_PATH", str(tmp_path / "state.json"))
     monkeypatch.setenv("LOG_LEVEL", "debug")
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHAT_IDS", "-99,-98")
 
     # Act
     config = watcher_module.Config.from_env()
@@ -178,6 +179,7 @@ def test_config_from_env_uses_defaults_and_minimum_poll_seconds(
     assert config.poll_seconds == 10
     assert config.state_path == tmp_path / "state.json"
     assert config.log_level == "DEBUG"
+    assert config.telegram_admin_chat_ids == ["-99", "-98"]
 
 
 def test_require_env_raises_when_value_missing(watcher_module, clear_watcher_env):
@@ -219,6 +221,29 @@ def test_parse_chat_ids_fallback_legacy(watcher_module, base_env, clear_watcher_
 
     # Assert
     assert chat_ids == ["999"]
+
+
+def test_parse_admin_chat_ids_from_env(watcher_module, clear_watcher_env, monkeypatch):
+    # Arrange
+    monkeypatch.setenv("TELEGRAM_ADMIN_CHAT_IDS", "-10, -20")
+
+    # Act
+    chat_ids = watcher_module.parse_admin_chat_ids()
+
+    # Assert
+    assert chat_ids == ["-10", "-20"]
+
+
+def test_parse_admin_chat_ids_returns_empty_when_unset(watcher_module, clear_watcher_env):
+    # Arrange
+    admin_chat_ids = None
+
+    # Act
+    chat_ids = watcher_module.parse_admin_chat_ids()
+
+    # Assert
+    assert admin_chat_ids is None
+    assert chat_ids == []
 
 
 def test_parse_chat_aliases_ignores_invalid_entries(watcher_module, clear_watcher_env, monkeypatch):
@@ -361,13 +386,13 @@ def test_fetch_telegram_updates_raises_on_non_ok_response(watcher_module):
 
 def test_parse_telegram_command_accepts_bot_suffix(watcher_module):
     # Arrange
-    text = "/disable@GarminBot please"
+    text = "/request@GarminBot please"
 
     # Act
     command = watcher_module.parse_telegram_command(text)
 
     # Assert
-    assert command == "/disable"
+    assert command == "/request"
 
 
 def test_parse_telegram_command_ignores_regular_text(watcher_module):
@@ -404,6 +429,13 @@ def test_state_store_loads_disabled_chats_and_update_offset(watcher_module, tmp_
             {
                 "processed_message_ids": ["1"],
                 "disabled_chat_ids": ["-1", 2],
+                "pending_subscription_requests": [
+                    {
+                        "chat_id": "-3",
+                        "chat_label": "runner",
+                        "requested_at": "2026-05-18T20:00:00-07:00",
+                    }
+                ],
                 "telegram_update_offset": 9,
             }
         ),
@@ -415,6 +447,13 @@ def test_state_store_loads_disabled_chats_and_update_offset(watcher_module, tmp_
 
     # Assert
     assert state.disabled_chat_ids == ["-1", "2"]
+    assert state.pending_subscription_requests == [
+        {
+            "chat_id": "-3",
+            "chat_label": "runner",
+            "requested_at": "2026-05-18T20:00:00-07:00",
+        }
+    ]
     assert state.telegram_update_offset == 9
 
 
@@ -444,6 +483,43 @@ def test_state_store_disable_enable_and_update_offset_persist(watcher_module, tm
     # Assert
     assert reloaded.disabled_chat_ids == []
     assert reloaded.telegram_update_offset == 12
+
+
+def test_state_store_add_pending_subscription_request_persists(watcher_module, tmp_path):
+    # Arrange
+    state_path = tmp_path / "state.json"
+    state = watcher_module.StateStore(state_path)
+    requested_at = datetime(2026, 5, 18, 20, 30)
+
+    # Act
+    created = state.add_pending_subscription_request("-2", "runner", requested_at)
+    reloaded = watcher_module.StateStore(state_path)
+
+    # Assert
+    assert created is True
+    assert reloaded.pending_subscription_requests == [
+        {
+            "chat_id": "-2",
+            "chat_label": "runner",
+            "requested_at": "2026-05-18T20:30:00",
+        }
+    ]
+
+
+def test_state_store_add_pending_subscription_request_ignores_duplicate(
+    watcher_module, tmp_path
+):
+    # Arrange
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    requested_at = datetime(2026, 5, 18, 20, 30)
+    state.add_pending_subscription_request("-2", "runner", requested_at)
+
+    # Act
+    created = state.add_pending_subscription_request("-2", "runner again", requested_at)
+
+    # Assert
+    assert created is False
+    assert len(state.pending_subscription_requests) == 1
 
 
 def test_state_store_add_ignores_duplicate_message_id(watcher_module, tmp_path):
@@ -558,6 +634,155 @@ def test_process_telegram_commands_ignores_non_command_message(watcher_module, t
 
     # Assert
     assert state.disabled_chat_ids == []
+
+
+def test_process_telegram_commands_records_request_and_notifies_admins_once(
+    watcher_module, tmp_path
+):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+        telegram_admin_chat_ids=["-99"],
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    updates = [
+        {
+            "update_id": 9,
+            "message": {
+                "text": "/request",
+                "chat": {"id": -2, "first_name": "Runner"},
+            },
+        }
+    ]
+    sent_to = []
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        with patch.object(
+            watcher_module,
+            "post_to_telegram",
+            side_effect=lambda _t, c, _m: sent_to.append(c),
+        ):
+            watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert sent_to == ["-2", "-99"]
+    assert state.pending_subscription_requests[0]["chat_id"] == "-2"
+    assert state.pending_subscription_requests[0]["chat_label"] == "Runner"
+
+
+def test_process_telegram_commands_duplicate_request_does_not_notify_admins(
+    watcher_module, tmp_path
+):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+        telegram_admin_chat_ids=["-99"],
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    state.add_pending_subscription_request("-2", "Runner", datetime(2026, 5, 18, 20, 30))
+    updates = [{"update_id": 10, "message": {"text": "/request", "chat": {"id": -2}}}]
+    sent_to = []
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        with patch.object(
+            watcher_module,
+            "post_to_telegram",
+            side_effect=lambda _t, c, _m: sent_to.append(c),
+        ):
+            watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert sent_to == ["-2"]
+    assert len(state.pending_subscription_requests) == 1
+
+
+def test_process_telegram_commands_configured_request_replies_without_pending(
+    watcher_module, tmp_path
+):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+        telegram_admin_chat_ids=["-99"],
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    updates = [{"update_id": 11, "message": {"text": "/request", "chat": {"id": -1}}}]
+    sent_to = []
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        with patch.object(
+            watcher_module,
+            "post_to_telegram",
+            side_effect=lambda _t, c, _m: sent_to.append(c),
+        ):
+            watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert sent_to == ["-1"]
+    assert state.pending_subscription_requests == []
+
+
+def test_process_telegram_commands_request_without_admins_records_and_replies(
+    watcher_module, tmp_path
+):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.gmail.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+    state = watcher_module.StateStore(tmp_path / "state.json")
+    updates = [{"update_id": 12, "message": {"text": "/request@GarminBot", "chat": {"id": -2}}}]
+    sent_to = []
+
+    # Act
+    with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
+        with patch.object(
+            watcher_module,
+            "post_to_telegram",
+            side_effect=lambda _t, c, _m: sent_to.append(c),
+        ):
+            watcher_module.process_telegram_commands(config, state)
+
+    # Assert
+    assert sent_to == ["-2"]
+    assert state.pending_subscription_requests[0]["chat_id"] == "-2"
 
 
 def test_fetch_message_ids_returns_empty_on_search_failure(watcher_module):
