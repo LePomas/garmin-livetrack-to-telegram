@@ -9,6 +9,8 @@ The project is intentionally small: one Python script, a systemd unit example, a
 - Watches unread IMAP messages for Garmin LiveTrack alerts.
 - Extracts LiveTrack URLs from plain text or HTML email bodies.
 - Sends MarkdownV2-formatted Telegram messages to one or more chat IDs.
+- Lets configured Telegram chats pause alerts with `/disable` and resume them with `/enable`.
+- Lets unknown Telegram chats request access with `/request`, notifying configured admins.
 - Stores processed email `Message-ID` values in a local state file to reduce duplicate alerts.
 - Can run once for smoke testing or continuously as a long-running service.
 
@@ -52,6 +54,7 @@ Required variables:
 
 Optional variables:
 
+- `TELEGRAM_ADMIN_CHAT_IDS`: comma-separated Telegram chat IDs that receive `/request` notifications.
 - `TELEGRAM_RECIPIENT_ALIASES`: comma-separated `chat_id=alias` pairs used only in logs.
 - `TELEGRAM_CHAT_ID`: legacy single-recipient fallback if `TELEGRAM_CHAT_IDS` is unset.
 - `IMAP_HOST`: defaults to `imap.gmail.com`.
@@ -77,6 +80,10 @@ Run continuously:
 ```
 
 The script loads `.env` from the repository root if it exists. Existing environment variables take precedence because `.env` values are loaded with `setdefault`.
+
+Configured Telegram recipients can send `/disable` to the bot to stop receiving LiveTrack alerts, then `/enable` to resume them. Commands only affect the chat that sent the command, and chats not listed in `TELEGRAM_CHAT_IDS` are ignored.
+
+Unknown Telegram chats can send `/request` to ask for access. The bot replies to the requester, stores one pending request per chat in the state file, and notifies `TELEGRAM_ADMIN_CHAT_IDS` if configured. Approval is manual: add the requested chat ID to `TELEGRAM_CHAT_IDS` in `.env` or deployment config.
 
 ## Running As A Service
 
@@ -125,6 +132,7 @@ Duplicate alerts:
 
 - Confirm the state file path is writable by the service user.
 - Avoid deleting `state/livetrack_state.json` unless you intentionally want to reprocess messages.
+- The same state file also stores disabled Telegram recipients, pending subscription requests, and the Telegram update offset.
 
 Telegram formatting errors:
 
@@ -149,6 +157,15 @@ Tests fail locally:
 - `.env.example` uses placeholders only.
 - `state/livetrack_state.json` may contain email message IDs and is ignored by Git.
 - Logs can include recipient aliases and message IDs. Use non-sensitive aliases.
+
+## Runtime
+
+- The watcher now uses `asyncio` for its polling loop and shutdown coordination.
+- IMAP and Telegram HTTP calls stay on the standard library and run in worker threads so the deployment footprint stays small.
+- Current behavior remains unchanged:
+  - `/disable` and `/enable` still apply per chat.
+  - `/request` still records one pending request per chat and notifies admins.
+  - LiveTrack email forwarding still deduplicates by `Message-ID`.
 
 ## License
 

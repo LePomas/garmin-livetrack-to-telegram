@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import email
 import email.policy
 import imaplib
@@ -12,11 +13,10 @@ import logging
 import os
 import re
 import signal
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import Message
 from pathlib import Path
@@ -56,6 +56,7 @@ class Config:
     poll_seconds: int
     state_path: Path
     log_level: str
+    telegram_admin_chat_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -72,6 +73,7 @@ class Config:
             poll_seconds=max(10, int(os.environ.get("POLL_SECONDS", "30"))),
             state_path=Path(os.environ.get("STATE_PATH", str(DEFAULT_STATE_PATH))).expanduser(),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+            telegram_admin_chat_ids=parse_admin_chat_ids(),
         )
 
 
@@ -85,10 +87,18 @@ def require_env(key: str) -> str:
 def parse_chat_ids() -> list[str]:
     raw = os.environ.get("TELEGRAM_CHAT_IDS", "").strip()
     if raw:
-        chat_ids = [item.strip() for item in raw.split(",") if item.strip()]
+        chat_ids = parse_comma_separated_ids(raw)
         if chat_ids:
             return chat_ids
     return [require_env("TELEGRAM_CHAT_ID")]
+
+
+def parse_admin_chat_ids() -> list[str]:
+    return parse_comma_separated_ids(os.environ.get("TELEGRAM_ADMIN_CHAT_IDS", ""))
+
+
+def parse_comma_separated_ids(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def parse_chat_aliases() -> dict[str, str]:
@@ -113,6 +123,9 @@ class StateStore:
         self.path = path
         self.max_entries = max_entries
         self.message_ids: list[str] = []
+        self.disabled_chat_ids: list[str] = []
+        self.pending_subscription_requests: list[dict[str, str]] = []
+        self.telegram_update_offset: int | None = None
         self._load()
 
     def _load(self) -> None:
@@ -123,8 +136,35 @@ class StateStore:
             items = data.get("processed_message_ids", [])
             if isinstance(items, list):
                 self.message_ids = [str(x) for x in items][-self.max_entries :]
+            disabled = data.get("disabled_chat_ids", [])
+            if isinstance(disabled, list):
+                self.disabled_chat_ids = [str(x) for x in disabled]
+            requests = data.get("pending_subscription_requests", [])
+            if isinstance(requests, list):
+                self.pending_subscription_requests = [
+                    {
+                        "chat_id": str(item["chat_id"]),
+                        "chat_label": str(item.get("chat_label", "")),
+                        "requested_at": str(item.get("requested_at", "")),
+                    }
+                    for item in requests
+                    if isinstance(item, dict) and item.get("chat_id") is not None
+                ]
+            offset = data.get("telegram_update_offset")
+            if isinstance(offset, int):
+                self.telegram_update_offset = offset
         except (json.JSONDecodeError, OSError):
             LOG.warning("State file unreadable; starting fresh: %s", self.path)
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "processed_message_ids": self.message_ids,
+            "disabled_chat_ids": self.disabled_chat_ids,
+            "pending_subscription_requests": self.pending_subscription_requests,
+            "telegram_update_offset": self.telegram_update_offset,
+        }
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def seen(self, message_id: str) -> bool:
         return message_id in self.message_ids
@@ -134,9 +174,43 @@ class StateStore:
             return
         self.message_ids.append(message_id)
         self.message_ids = self.message_ids[-self.max_entries :]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"processed_message_ids": self.message_ids}
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._save()
+
+    def disable_chat(self, chat_id: str) -> None:
+        if chat_id in self.disabled_chat_ids:
+            return
+        self.disabled_chat_ids.append(chat_id)
+        self._save()
+
+    def enable_chat(self, chat_id: str) -> None:
+        if chat_id not in self.disabled_chat_ids:
+            return
+        self.disabled_chat_ids = [item for item in self.disabled_chat_ids if item != chat_id]
+        self._save()
+
+    def set_telegram_update_offset(self, offset: int) -> None:
+        if self.telegram_update_offset == offset:
+            return
+        self.telegram_update_offset = offset
+        self._save()
+
+    def has_pending_subscription_request(self, chat_id: str) -> bool:
+        return any(item.get("chat_id") == chat_id for item in self.pending_subscription_requests)
+
+    def add_pending_subscription_request(
+        self, chat_id: str, chat_label: str, requested_at: datetime
+    ) -> bool:
+        if self.has_pending_subscription_request(chat_id):
+            return False
+        self.pending_subscription_requests.append(
+            {
+                "chat_id": chat_id,
+                "chat_label": chat_label,
+                "requested_at": requested_at.isoformat(),
+            }
+        )
+        self._save()
+        return True
 
 
 def is_garmin_livetrack(msg: Message) -> bool:
@@ -223,6 +297,164 @@ def post_to_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError("Telegram API returned non-ok response")
 
 
+def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, object]]:
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params: dict[str, str] = {
+        "timeout": "0",
+        "allowed_updates": json.dumps(["message"]),
+    }
+    if offset is not None:
+        params["offset"] = str(offset)
+    request_url = f"{url}?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url=request_url, method="GET")
+    with urllib.request.urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    payload = json.loads(body)
+    if not payload.get("ok"):
+        raise RuntimeError("Telegram getUpdates returned non-ok response")
+    updates = payload.get("result", [])
+    if not isinstance(updates, list):
+        return []
+    return [update for update in updates if isinstance(update, dict)]
+
+
+def parse_telegram_command(text: str) -> str | None:
+    first_token = text.strip().split(maxsplit=1)[0] if text.strip() else ""
+    command = first_token.split("@", 1)[0].lower()
+    if command in {"/disable", "/enable", "/request"}:
+        return command
+    return None
+
+
+def get_telegram_chat_label(chat: dict[str, object], chat_id: str) -> str:
+    title = chat.get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    username = chat.get("username")
+    if isinstance(username, str) and username.strip():
+        return f"@{username.strip()}"
+    first_name = chat.get("first_name")
+    last_name = chat.get("last_name")
+    name_parts = [
+        item.strip()
+        for item in (first_name, last_name)
+        if isinstance(item, str) and item.strip()
+    ]
+    if name_parts:
+        return " ".join(name_parts)
+    return f"chat {chat_id}"
+
+
+def build_subscription_request_received_message() -> str:
+    return escape_markdown_v2(
+        "Subscription request received. An admin needs to approve this chat before LiveTrack alerts are sent."
+    )
+
+
+def build_already_subscribed_message() -> str:
+    return escape_markdown_v2("This chat is already configured for LiveTrack alerts.")
+
+
+def build_disable_confirmation_message() -> str:
+    return escape_markdown_v2("LiveTrack alerts are now disabled for this chat.")
+
+
+def build_enable_confirmation_message() -> str:
+    return escape_markdown_v2("LiveTrack alerts are now enabled for this chat.")
+
+
+def build_admin_subscription_request_message(chat_id: str, chat_label: str) -> str:
+    return (
+        "*New Garmin LiveTrack subscription request*\n\n"
+        f"*Chat:* {escape_markdown_v2(chat_label)}\n"
+        f"*Chat ID:* {escape_markdown_v2(chat_id)}\n\n"
+        f"{escape_markdown_v2('Add this chat ID to TELEGRAM_CHAT_IDS to approve the request.')}"
+    )
+
+
+def notify_subscription_request_admins(config: Config, chat_id: str, chat_label: str) -> None:
+    if not config.telegram_admin_chat_ids:
+        LOG.info("No Telegram admin recipients configured for subscription request from %s", chat_id)
+        return
+    text = build_admin_subscription_request_message(chat_id, chat_label)
+    for admin_chat_id in config.telegram_admin_chat_ids:
+        post_to_telegram(config.telegram_bot_token, admin_chat_id, text)
+
+
+def handle_subscription_request(
+    config: Config, state: StateStore, chat_id: str, chat: dict[str, object]
+) -> None:
+    if chat_id in set(config.telegram_chat_ids):
+        post_to_telegram(
+            config.telegram_bot_token,
+            chat_id,
+            build_already_subscribed_message(),
+        )
+        return
+
+    chat_label = get_telegram_chat_label(chat, chat_id)
+    is_new_request = not state.has_pending_subscription_request(chat_id)
+    post_to_telegram(
+        config.telegram_bot_token,
+        chat_id,
+        build_subscription_request_received_message(),
+    )
+    if is_new_request:
+        notify_subscription_request_admins(config, chat_id, chat_label)
+        state.add_pending_subscription_request(
+            chat_id=chat_id,
+            chat_label=chat_label,
+            requested_at=datetime.now().astimezone(),
+        )
+    LOG.info("Recorded Telegram subscription request from %s", chat_label)
+
+
+def process_telegram_commands(config: Config, state: StateStore) -> None:
+    updates = fetch_telegram_updates(config.telegram_bot_token, state.telegram_update_offset)
+    allowed_chat_ids = set(config.telegram_chat_ids)
+    for update in updates:
+        update_id = update.get("update_id")
+        message = update.get("message")
+        if isinstance(message, dict):
+            text = message.get("text")
+            chat = message.get("chat")
+            if isinstance(text, str) and isinstance(chat, dict):
+                chat_id_raw = chat.get("id")
+                if chat_id_raw is not None:
+                    chat_id = str(chat_id_raw)
+                    command = parse_telegram_command(text)
+                    if command == "/request":
+                        handle_subscription_request(config, state, chat_id, chat)
+                    elif chat_id in allowed_chat_ids and command == "/disable":
+                        state.disable_chat(chat_id)
+                        post_to_telegram(
+                            config.telegram_bot_token,
+                            chat_id,
+                            build_disable_confirmation_message(),
+                        )
+                        LOG.info(
+                            "Disabled Telegram recipient %s",
+                            config.telegram_recipient_aliases.get(chat_id, chat_id),
+                        )
+                    elif chat_id in allowed_chat_ids and command == "/enable":
+                        state.enable_chat(chat_id)
+                        post_to_telegram(
+                            config.telegram_bot_token,
+                            chat_id,
+                            build_enable_confirmation_message(),
+                        )
+                        LOG.info(
+                            "Enabled Telegram recipient %s",
+                            config.telegram_recipient_aliases.get(chat_id, chat_id),
+                        )
+        if isinstance(update_id, int):
+            state.set_telegram_update_offset(update_id + 1)
+
+
+async def process_telegram_commands_async(config: Config, state: StateStore) -> None:
+    await asyncio.to_thread(process_telegram_commands, config, state)
+
+
 def build_telegram_message(link: str, subject: str, received_at: datetime) -> str:
     subject_escaped = escape_markdown_v2(subject)
     time_text = escape_markdown_v2(received_at.strftime("%H:%M"))
@@ -270,7 +502,14 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
         text = build_telegram_message(link=link, subject=subject, received_at=dt)
         errors: list[str] = []
         sent_recipients = 0
-        for chat_id in config.telegram_chat_ids:
+        active_chat_ids = [
+            chat_id for chat_id in config.telegram_chat_ids if chat_id not in state.disabled_chat_ids
+        ]
+        if not active_chat_ids:
+            LOG.info("No active Telegram recipients for LiveTrack message %s", message_id)
+            state.add(message_id)
+            continue
+        for chat_id in active_chat_ids:
             alias = config.telegram_recipient_aliases.get(chat_id, chat_id)
             try:
                 post_to_telegram(config.telegram_bot_token, chat_id, text)
@@ -282,7 +521,7 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
         if errors:
             raise RuntimeError(
                 f"Failed Telegram delivery for message {message_id}; "
-                f"sent={sent_recipients}/{len(config.telegram_chat_ids)}; "
+                f"sent={sent_recipients}/{len(active_chat_ids)}; "
                 f"errors={'; '.join(errors)}"
             )
         state.add(message_id)
@@ -291,8 +530,14 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
     return sent_count
 
 
+async def process_unseen_messages_async(
+    conn: imaplib.IMAP4_SSL, config: Config, state: StateStore
+) -> int:
+    return await asyncio.to_thread(process_unseen_messages, conn, config, state)
+
+
 def connect_imap(config: Config) -> imaplib.IMAP4_SSL:
-    conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port)
+    conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=20)
     conn.login(config.imap_user, config.imap_password)
     status, _ = conn.select("INBOX")
     if status != "OK":
@@ -300,46 +545,77 @@ def connect_imap(config: Config) -> imaplib.IMAP4_SSL:
     return conn
 
 
-def run_loop(config: Config) -> None:
-    stop = False
+async def connect_imap_async(config: Config) -> imaplib.IMAP4_SSL:
+    return await asyncio.to_thread(connect_imap, config)
 
-    def handle_signal(_signum: int, _frame: object) -> None:
-        nonlocal stop
-        stop = True
 
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+async def logout_imap_async(conn: imaplib.IMAP4_SSL) -> None:
+    try:
+        await asyncio.to_thread(conn.logout)
+    except Exception:
+        pass
+
+
+def install_stop_handlers(stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+
+    def request_stop() -> None:
+        stop_event.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, request_stop)
+        except (NotImplementedError, RuntimeError, ValueError):
+            signal.signal(signum, lambda _signum, _frame: loop.call_soon_threadsafe(request_stop))
+
+
+async def wait_for_poll_interval(stop_event: asyncio.Event, seconds: int) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
+
+
+async def run_loop_async(
+    config: Config, *, stop_event: asyncio.Event | None = None, install_signals: bool = True
+) -> None:
+    stop_event = stop_event or asyncio.Event()
+    if install_signals:
+        install_stop_handlers(stop_event)
 
     state = StateStore(config.state_path)
     conn: imaplib.IMAP4_SSL | None = None
 
-    while not stop:
-        try:
-            if conn is None:
-                conn = connect_imap(config)
-                LOG.info("Connected to IMAP server %s", config.imap_host)
-            sent = process_unseen_messages(conn, config, state)
-            LOG.debug("Scan complete; forwarded=%d", sent)
-            time.sleep(config.poll_seconds)
-            conn.noop()
-        except (imaplib.IMAP4.error, OSError, urllib.error.URLError, RuntimeError) as exc:
-            LOG.warning("Watcher error: %s", exc)
-            if conn is not None:
-                try:
-                    conn.logout()
-                except Exception:
-                    pass
-            conn = None
-            time.sleep(min(config.poll_seconds, 15))
-        except Exception:
-            LOG.exception("Unexpected error")
-            time.sleep(10)
+    try:
+        while not stop_event.is_set():
+            try:
+                if conn is None:
+                    conn = await connect_imap_async(config)
+                    LOG.info("Connected to IMAP server %s", config.imap_host)
+                await process_telegram_commands_async(config, state)
+                sent = await process_unseen_messages_async(conn, config, state)
+                LOG.debug("Scan complete; forwarded=%d", sent)
+                await wait_for_poll_interval(stop_event, config.poll_seconds)
+                if stop_event.is_set():
+                    break
+                if conn is not None:
+                    await asyncio.to_thread(conn.noop)
+            except (imaplib.IMAP4.error, OSError, urllib.error.URLError, RuntimeError) as exc:
+                LOG.warning("Watcher error: %s", exc)
+                if conn is not None:
+                    await logout_imap_async(conn)
+                conn = None
+                await wait_for_poll_interval(stop_event, min(config.poll_seconds, 15))
+            except Exception:
+                LOG.exception("Unexpected error")
+                await wait_for_poll_interval(stop_event, 10)
+    finally:
+        if conn is not None:
+            await logout_imap_async(conn)
 
-    if conn is not None:
-        try:
-            conn.logout()
-        except Exception:
-            pass
+
+def run_loop(config: Config) -> None:
+    asyncio.run(run_loop_async(config))
 
 
 def parse_args() -> argparse.Namespace:
@@ -348,7 +624,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+async def main_async() -> int:
     args = parse_args()
     config = Config.from_env()
     logging.basicConfig(
@@ -357,16 +633,21 @@ def main() -> int:
     )
 
     if args.once:
-        conn = connect_imap(config)
+        conn = await connect_imap_async(config)
         try:
             state = StateStore(config.state_path)
-            process_unseen_messages(conn, config, state)
+            await process_telegram_commands_async(config, state)
+            await process_unseen_messages_async(conn, config, state)
         finally:
-            conn.logout()
+            await logout_imap_async(conn)
         return 0
 
-    run_loop(config)
+    await run_loop_async(config)
     return 0
+
+
+def main() -> int:
+    return asyncio.run(main_async())
 
 
 if __name__ == "__main__":
