@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 
-def test_is_garmin_livetrack_true(watcher_module, sample_message):
+def test_should_identify_garmin_livetrack_message(watcher_module, sample_message):
     # Arrange
     message = sample_message
 
@@ -19,7 +19,7 @@ def test_is_garmin_livetrack_true(watcher_module, sample_message):
     assert result is True
 
 
-def test_extract_livetrack_link_returns_session_url(watcher_module, sample_message):
+def test_should_extract_session_livetrack_link(watcher_module, sample_message):
     # Arrange
     message = sample_message
 
@@ -30,7 +30,7 @@ def test_extract_livetrack_link_returns_session_url(watcher_module, sample_messa
     assert link == "https://livetrack.garmin.com/session/sample-session-123"
 
 
-def test_extract_livetrack_link_skips_image_url(watcher_module):
+def test_should_skip_image_livetrack_urls(watcher_module):
     # Arrange
     raw = (
         b"From: Garmin <noreply@garmin.com>\n"
@@ -49,7 +49,7 @@ def test_extract_livetrack_link_skips_image_url(watcher_module):
     assert link == "https://connect.garmin.com/livetrack/invite/abc"
 
 
-def test_extract_livetrack_link_reads_html_multipart(watcher_module):
+def test_should_read_livetrack_link_from_html_multipart(watcher_module):
     # Arrange
     raw = (
         b"From: Garmin <noreply@garmin.com>\n"
@@ -76,7 +76,7 @@ def test_extract_livetrack_link_reads_html_multipart(watcher_module):
     assert link == "https://livetrack.garmin.com/session/html123"
 
 
-def test_extract_livetrack_link_prefers_livetrack_garmin_url(watcher_module):
+def test_should_prefer_livetrack_garmin_url(watcher_module):
     # Arrange
     raw = (
         b"From: Garmin <noreply@garmin.com>\n"
@@ -95,7 +95,7 @@ def test_extract_livetrack_link_prefers_livetrack_garmin_url(watcher_module):
     assert link == "https://livetrack.garmin.com/invite/def"
 
 
-def test_decode_part_payload_falls_back_for_unknown_charset(watcher_module):
+def test_should_decode_payload_with_unknown_charset_fallback(watcher_module):
     # Arrange
     raw = (
         b"Content-Type: text/plain; charset=unknown-charset\n"
@@ -112,7 +112,7 @@ def test_decode_part_payload_falls_back_for_unknown_charset(watcher_module):
     assert text == "hello"
 
 
-def test_decode_part_payload_returns_string_payload(watcher_module):
+def test_should_return_string_payload_without_decoding(watcher_module):
     # Arrange
     message = email.message_from_string("plain body", policy=email.policy.default)
 
@@ -123,7 +123,7 @@ def test_decode_part_payload_returns_string_payload(watcher_module):
     assert text == "plain body"
 
 
-def test_load_env_file_sets_missing_values_only(watcher_module, tmp_path, monkeypatch):
+def test_should_load_env_file_without_overriding_existing_values(watcher_module, tmp_path, monkeypatch):
     # Arrange
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -148,7 +148,7 @@ def test_load_env_file_sets_missing_values_only(watcher_module, tmp_path, monkey
     assert watcher_module.os.environ["NEW_VALUE"] == "from file"
 
 
-def test_load_env_file_ignores_missing_file(watcher_module, tmp_path):
+def test_should_ignore_missing_env_file(watcher_module, tmp_path):
     # Arrange
     env_file = tmp_path / "missing.env"
 
@@ -159,7 +159,7 @@ def test_load_env_file_ignores_missing_file(watcher_module, tmp_path):
     assert result is None
 
 
-def test_config_from_env_uses_defaults_and_minimum_poll_seconds(
+def test_should_build_config_with_defaults_and_minimum_poll_seconds(
     watcher_module, base_env, clear_watcher_env, monkeypatch, tmp_path
 ):
     # Arrange
@@ -183,7 +183,7 @@ def test_config_from_env_uses_defaults_and_minimum_poll_seconds(
     assert config.telegram_admin_chat_ids == ["-99", "-98"]
 
 
-def test_require_env_raises_when_value_missing(watcher_module, clear_watcher_env):
+def test_should_raise_when_required_env_value_is_missing(watcher_module, clear_watcher_env):
     # Arrange
     key = "MISSING_VALUE"
 
@@ -198,7 +198,7 @@ def test_require_env_raises_when_value_missing(watcher_module, clear_watcher_env
     assert str(error) == "Missing required environment variable: MISSING_VALUE"
 
 
-def test_parse_chat_ids_from_telegram_chat_ids(watcher_module, base_env, clear_watcher_env, monkeypatch):
+def test_should_parse_chat_ids_from_multi_value_env(watcher_module, base_env, clear_watcher_env, monkeypatch):
     # Arrange
     for key, value in base_env.items():
         monkeypatch.setenv(key, value)
@@ -211,7 +211,7 @@ def test_parse_chat_ids_from_telegram_chat_ids(watcher_module, base_env, clear_w
     assert chat_ids == ["-1", "-2", "3"]
 
 
-def test_parse_chat_ids_fallback_legacy(watcher_module, base_env, clear_watcher_env, monkeypatch):
+def test_should_fall_back_to_legacy_chat_id(watcher_module, base_env, clear_watcher_env, monkeypatch):
     # Arrange
     for key, value in base_env.items():
         monkeypatch.setenv(key, value)
@@ -224,7 +224,7 @@ def test_parse_chat_ids_fallback_legacy(watcher_module, base_env, clear_watcher_
     assert chat_ids == ["999"]
 
 
-def test_parse_admin_chat_ids_from_env(watcher_module, clear_watcher_env, monkeypatch):
+def test_should_parse_admin_chat_ids_from_env(watcher_module, clear_watcher_env, monkeypatch):
     # Arrange
     monkeypatch.setenv("TELEGRAM_ADMIN_CHAT_IDS", "-10, -20")
 
@@ -235,7 +235,7 @@ def test_parse_admin_chat_ids_from_env(watcher_module, clear_watcher_env, monkey
     assert chat_ids == ["-10", "-20"]
 
 
-def test_parse_admin_chat_ids_returns_empty_when_unset(watcher_module, clear_watcher_env):
+def test_should_return_empty_admin_chat_ids_when_unset(watcher_module, clear_watcher_env):
     # Arrange
     admin_chat_ids = None
 
@@ -247,7 +247,7 @@ def test_parse_admin_chat_ids_returns_empty_when_unset(watcher_module, clear_wat
     assert chat_ids == []
 
 
-def test_parse_chat_aliases_ignores_invalid_entries(watcher_module, clear_watcher_env, monkeypatch):
+def test_should_ignore_invalid_chat_alias_entries(watcher_module, clear_watcher_env, monkeypatch):
     # Arrange
     monkeypatch.setenv("TELEGRAM_RECIPIENT_ALIASES", "-1=team,bad_entry,-2=")
 
@@ -258,7 +258,7 @@ def test_parse_chat_aliases_ignores_invalid_entries(watcher_module, clear_watche
     assert aliases == {"-1": "team"}
 
 
-def test_parse_chat_aliases_returns_empty_when_unset(watcher_module, clear_watcher_env):
+def test_should_return_empty_chat_aliases_when_unset(watcher_module, clear_watcher_env):
     # Arrange
     aliases_env = None
 
@@ -270,7 +270,7 @@ def test_parse_chat_aliases_returns_empty_when_unset(watcher_module, clear_watch
     assert aliases == {}
 
 
-def test_escape_markdown_v2_escapes_special_chars(watcher_module):
+def test_should_escape_markdown_v2_special_chars(watcher_module):
     # Arrange
     text = "a_b[c]!"
 
@@ -281,7 +281,7 @@ def test_escape_markdown_v2_escapes_special_chars(watcher_module):
     assert escaped == "a\\_b\\[c\\]\\!"
 
 
-def test_build_telegram_message_contains_bold_subject(watcher_module):
+def test_should_include_bold_subject_in_telegram_message(watcher_module):
     # Arrange
     dt = datetime(2026, 5, 12, 16, 50)
 
@@ -296,7 +296,7 @@ def test_build_telegram_message_contains_bold_subject(watcher_module):
     assert "🚴 *Garmin LiveTrack Update* 🏃" in message
 
 
-def test_build_telegram_message_contains_date_time_line(watcher_module):
+def test_should_include_date_time_line_in_telegram_message(watcher_module):
     # Arrange
     dt = datetime(2026, 5, 12, 16, 50)
 
@@ -311,7 +311,7 @@ def test_build_telegram_message_contains_date_time_line(watcher_module):
     assert "📅 *Date:* 12/05/2026 \\| 🕒 *Time:* 16:50" in message
 
 
-def test_post_to_telegram_uses_markdown_v2(watcher_module):
+def test_should_post_to_telegram_with_markdown_v2(watcher_module):
     # Arrange
     token = "123:abc"
     chat_id = "-1"
@@ -330,7 +330,7 @@ def test_post_to_telegram_uses_markdown_v2(watcher_module):
     assert "parse_mode=MarkdownV2" in parse_mode
 
 
-def test_post_to_telegram_raises_on_non_ok_response(watcher_module):
+def test_should_raise_when_telegram_send_response_is_not_ok(watcher_module):
     # Arrange
     response = Mock()
     response.read.return_value = b'{"ok":false}'
@@ -349,7 +349,7 @@ def test_post_to_telegram_raises_on_non_ok_response(watcher_module):
     assert str(error) == "Telegram API returned non-ok response"
 
 
-def test_fetch_telegram_updates_reads_result_and_offset(watcher_module):
+def test_should_fetch_telegram_updates_with_offset(watcher_module):
     # Arrange
     response = Mock()
     response.read.return_value = b'{"ok":true,"result":[{"update_id":7}]}'
@@ -366,7 +366,7 @@ def test_fetch_telegram_updates_reads_result_and_offset(watcher_module):
     assert "offset=4" in request_url
 
 
-def test_fetch_telegram_updates_raises_on_non_ok_response(watcher_module):
+def test_should_raise_when_telegram_updates_response_is_not_ok(watcher_module):
     # Arrange
     response = Mock()
     response.read.return_value = b'{"ok":false}'
@@ -385,7 +385,7 @@ def test_fetch_telegram_updates_raises_on_non_ok_response(watcher_module):
     assert str(error) == "Telegram getUpdates returned non-ok response"
 
 
-def test_parse_telegram_command_accepts_bot_suffix(watcher_module):
+def test_should_accept_telegram_command_with_bot_suffix(watcher_module):
     # Arrange
     text = "/request@GarminBot please"
 
@@ -396,7 +396,7 @@ def test_parse_telegram_command_accepts_bot_suffix(watcher_module):
     assert command == "/request"
 
 
-def test_parse_telegram_command_ignores_regular_text(watcher_module):
+def test_should_ignore_regular_text_as_telegram_command(watcher_module):
     # Arrange
     text = "disable"
 
@@ -407,7 +407,7 @@ def test_parse_telegram_command_ignores_regular_text(watcher_module):
     assert command is None
 
 
-def test_state_store_loads_and_trims_existing_state(watcher_module, tmp_path):
+def test_should_load_and_trim_existing_state(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
     state_path.write_text(
@@ -422,7 +422,7 @@ def test_state_store_loads_and_trims_existing_state(watcher_module, tmp_path):
     assert state.message_ids == ["2", "3"]
 
 
-def test_state_store_loads_disabled_chats_and_update_offset(watcher_module, tmp_path):
+def test_should_load_disabled_chats_pending_requests_and_update_offset(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
     state_path.write_text(
@@ -458,7 +458,7 @@ def test_state_store_loads_disabled_chats_and_update_offset(watcher_module, tmp_
     assert state.telegram_update_offset == 9
 
 
-def test_state_store_ignores_unreadable_json(watcher_module, tmp_path):
+def test_should_ignore_unreadable_state_json(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
     state_path.write_text("{not-json", encoding="utf-8")
@@ -470,7 +470,7 @@ def test_state_store_ignores_unreadable_json(watcher_module, tmp_path):
     assert state.message_ids == []
 
 
-def test_state_store_disable_enable_and_update_offset_persist(watcher_module, tmp_path):
+def test_should_persist_disabled_chats_and_update_offset(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
     state = watcher_module.StateStore(state_path)
@@ -486,7 +486,7 @@ def test_state_store_disable_enable_and_update_offset_persist(watcher_module, tm
     assert reloaded.telegram_update_offset == 12
 
 
-def test_state_store_add_pending_subscription_request_persists(watcher_module, tmp_path):
+def test_should_persist_pending_subscription_request(watcher_module, tmp_path):
     # Arrange
     state_path = tmp_path / "state.json"
     state = watcher_module.StateStore(state_path)
@@ -507,7 +507,7 @@ def test_state_store_add_pending_subscription_request_persists(watcher_module, t
     ]
 
 
-def test_state_store_add_pending_subscription_request_ignores_duplicate(
+def test_should_ignore_duplicate_pending_subscription_request(
     watcher_module, tmp_path
 ):
     # Arrange
@@ -523,7 +523,7 @@ def test_state_store_add_pending_subscription_request_ignores_duplicate(
     assert len(state.pending_subscription_requests) == 1
 
 
-def test_state_store_add_ignores_duplicate_message_id(watcher_module, tmp_path):
+def test_should_ignore_duplicate_message_id(watcher_module, tmp_path):
     # Arrange
     state = watcher_module.StateStore(tmp_path / "state.json")
     state.add("message-1")
@@ -535,7 +535,7 @@ def test_state_store_add_ignores_duplicate_message_id(watcher_module, tmp_path):
     assert state.message_ids == ["message-1"]
 
 
-def test_process_telegram_commands_disables_configured_chat(watcher_module, tmp_path):
+def test_should_disable_configured_chat_from_telegram_command(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -568,7 +568,7 @@ def test_process_telegram_commands_disables_configured_chat(watcher_module, tmp_
     assert state.telegram_update_offset == 6
 
 
-def test_process_telegram_commands_enables_configured_chat(watcher_module, tmp_path):
+def test_should_enable_configured_chat_from_telegram_command(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -601,7 +601,7 @@ def test_process_telegram_commands_enables_configured_chat(watcher_module, tmp_p
     assert state.disabled_chat_ids == []
 
 
-def test_process_telegram_commands_ignores_unknown_chat(watcher_module, tmp_path):
+def test_should_ignore_unknown_chat_commands(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -626,7 +626,7 @@ def test_process_telegram_commands_ignores_unknown_chat(watcher_module, tmp_path
     assert state.disabled_chat_ids == []
 
 
-def test_process_telegram_commands_ignores_non_command_message(watcher_module, tmp_path):
+def test_should_ignore_non_command_telegram_message(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -651,7 +651,7 @@ def test_process_telegram_commands_ignores_non_command_message(watcher_module, t
     assert state.disabled_chat_ids == []
 
 
-def test_process_telegram_commands_records_request_and_notifies_admins_once(
+def test_should_record_subscription_request_and_notify_admins_once(
     watcher_module, tmp_path
 ):
     # Arrange
@@ -695,7 +695,7 @@ def test_process_telegram_commands_records_request_and_notifies_admins_once(
     assert state.pending_subscription_requests[0]["chat_label"] == "Runner"
 
 
-def test_process_telegram_commands_duplicate_request_does_not_notify_admins(
+def test_should_reply_to_duplicate_request_without_notifying_admins(
     watcher_module, tmp_path
 ):
     # Arrange
@@ -731,7 +731,7 @@ def test_process_telegram_commands_duplicate_request_does_not_notify_admins(
     assert len(state.pending_subscription_requests) == 1
 
 
-def test_process_telegram_commands_configured_request_replies_without_pending(
+def test_should_reply_to_configured_request_without_pending_record(
     watcher_module, tmp_path
 ):
     # Arrange
@@ -766,7 +766,7 @@ def test_process_telegram_commands_configured_request_replies_without_pending(
     assert state.pending_subscription_requests == []
 
 
-def test_process_telegram_commands_request_without_admins_records_and_replies(
+def test_should_record_and_reply_to_request_without_admins(
     watcher_module, tmp_path
 ):
     # Arrange
@@ -800,7 +800,7 @@ def test_process_telegram_commands_request_without_admins_records_and_replies(
     assert state.pending_subscription_requests[0]["chat_id"] == "-2"
 
 
-def test_fetch_message_ids_returns_empty_on_search_failure(watcher_module):
+def test_should_return_empty_message_ids_on_search_failure(watcher_module):
     # Arrange
     conn = Mock()
     conn.search.return_value = ("NO", [])
@@ -812,7 +812,7 @@ def test_fetch_message_ids_returns_empty_on_search_failure(watcher_module):
     assert message_ids == []
 
 
-def test_fetch_message_ids_decodes_search_results(watcher_module):
+def test_should_decode_message_id_search_results(watcher_module):
     # Arrange
     conn = Mock()
     conn.search.return_value = ("OK", [b"1 2 3"])
@@ -824,7 +824,7 @@ def test_fetch_message_ids_decodes_search_results(watcher_module):
     assert message_ids == ["1", "2", "3"]
 
 
-def test_fetch_message_returns_none_when_fetch_fails(watcher_module):
+def test_should_return_none_when_message_fetch_fails(watcher_module):
     # Arrange
     conn = Mock()
     conn.fetch.return_value = ("NO", [])
@@ -836,7 +836,7 @@ def test_fetch_message_returns_none_when_fetch_fails(watcher_module):
     assert message is None
 
 
-def test_fetch_message_parses_rfc822_tuple(watcher_module):
+def test_should_parse_message_from_rfc822_tuple(watcher_module):
     # Arrange
     conn = Mock()
     conn.fetch.return_value = (
@@ -851,7 +851,7 @@ def test_fetch_message_parses_rfc822_tuple(watcher_module):
     assert message["From"] == "Garmin <noreply@garmin.com>"
 
 
-def test_fetch_message_returns_none_without_rfc822_bytes(watcher_module):
+def test_should_return_none_without_rfc822_bytes(watcher_module):
     # Arrange
     conn = Mock()
     conn.fetch.return_value = ("OK", [b"FLAGS (\\Seen)"])
@@ -863,7 +863,7 @@ def test_fetch_message_returns_none_without_rfc822_bytes(watcher_module):
     assert message is None
 
 
-def test_process_unseen_messages_broadcasts_all_recipients(watcher_module, sample_message, tmp_path):
+def test_should_broadcast_unseen_livetrack_message_to_all_recipients(watcher_module, sample_message, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -890,7 +890,7 @@ def test_process_unseen_messages_broadcasts_all_recipients(watcher_module, sampl
     assert sent_to == ["-1", "-2", "3"]
 
 
-def test_process_unseen_messages_skips_disabled_recipient(watcher_module, sample_message, tmp_path):
+def test_should_skip_disabled_recipient_for_unseen_message(watcher_module, sample_message, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -918,7 +918,7 @@ def test_process_unseen_messages_skips_disabled_recipient(watcher_module, sample
     assert sent_to == ["-2"]
 
 
-def test_process_unseen_messages_marks_seen_when_all_recipients_disabled(
+def test_should_mark_message_seen_when_all_recipients_are_disabled(
     watcher_module, sample_message, tmp_path
 ):
     # Arrange
@@ -949,7 +949,7 @@ def test_process_unseen_messages_marks_seen_when_all_recipients_disabled(
     post_to_telegram.assert_not_called()
 
 
-def test_process_unseen_messages_marks_seen_message_in_state(watcher_module, sample_message, tmp_path):
+def test_should_mark_delivered_message_seen_in_state(watcher_module, sample_message, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -975,7 +975,7 @@ def test_process_unseen_messages_marks_seen_message_in_state(watcher_module, sam
     assert state.seen("<test-message-id>") is True
 
 
-def test_process_unseen_messages_raises_on_partial_delivery_failure(watcher_module, sample_message, tmp_path):
+def test_should_raise_on_partial_delivery_failure(watcher_module, sample_message, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -1010,7 +1010,7 @@ def test_process_unseen_messages_raises_on_partial_delivery_failure(watcher_modu
     assert isinstance(error, RuntimeError)
 
 
-def test_process_unseen_messages_skips_missing_message(watcher_module, tmp_path):
+def test_should_skip_missing_unseen_message(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -1035,7 +1035,7 @@ def test_process_unseen_messages_skips_missing_message(watcher_module, tmp_path)
     assert sent_count == 0
 
 
-def test_process_unseen_messages_marks_non_garmin_message_seen(watcher_module, tmp_path):
+def test_should_mark_non_garmin_message_seen(watcher_module, tmp_path):
     # Arrange
     raw = (
         b"From: Example <sender@example.com>\n"
@@ -1069,7 +1069,7 @@ def test_process_unseen_messages_marks_non_garmin_message_seen(watcher_module, t
     assert state.seen("<non-garmin>") is True
 
 
-def test_process_unseen_messages_marks_garmin_without_link_seen(watcher_module, tmp_path):
+def test_should_mark_garmin_message_without_link_seen(watcher_module, tmp_path):
     # Arrange
     raw = (
         b"From: Garmin <noreply@garmin.com>\n"
@@ -1103,7 +1103,7 @@ def test_process_unseen_messages_marks_garmin_without_link_seen(watcher_module, 
     assert state.seen("<no-link>") is True
 
 
-def test_process_unseen_messages_skips_already_seen_message(watcher_module, sample_message, tmp_path):
+def test_should_skip_already_seen_message(watcher_module, sample_message, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.gmail.com",
@@ -1131,7 +1131,7 @@ def test_process_unseen_messages_skips_already_seen_message(watcher_module, samp
     post_to_telegram.assert_not_called()
 
 
-def test_connect_imap_logs_in_and_selects_inbox(watcher_module):
+def test_should_connect_imap_login_and_select_inbox(watcher_module):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.example.com",
@@ -1159,7 +1159,7 @@ def test_connect_imap_logs_in_and_selects_inbox(watcher_module):
     conn.select.assert_called_once_with("INBOX")
 
 
-def test_connect_imap_raises_when_inbox_select_fails(watcher_module):
+def test_should_raise_when_imap_inbox_select_fails(watcher_module):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.example.com",
@@ -1188,7 +1188,7 @@ def test_connect_imap_raises_when_inbox_select_fails(watcher_module):
     assert str(error) == "Unable to select INBOX"
 
 
-def test_run_loop_stops_without_noop_after_poll_sleep(watcher_module, tmp_path):
+def test_should_stop_run_loop_without_noop_after_poll_sleep(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.example.com",
@@ -1249,7 +1249,7 @@ def test_run_loop_stops_without_noop_after_poll_sleep(watcher_module, tmp_path):
     assert conn.logout_calls == 1
 
 
-def test_run_loop_reconnects_after_noop_failure(watcher_module, tmp_path):
+def test_should_reconnect_run_loop_after_noop_failure(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.example.com",
@@ -1332,7 +1332,7 @@ def test_run_loop_reconnects_after_noop_failure(watcher_module, tmp_path):
     assert second_conn.logout_calls == 1
 
 
-def test_parse_args_reads_once_flag(watcher_module, monkeypatch):
+def test_should_parse_once_flag(watcher_module, monkeypatch):
     # Arrange
     monkeypatch.setattr(sys, "argv", ["livetrack_watcher.py", "--once"])
 
@@ -1343,7 +1343,7 @@ def test_parse_args_reads_once_flag(watcher_module, monkeypatch):
     assert args.once is True
 
 
-def test_main_once_mode_returns_zero(watcher_module):
+def test_should_return_zero_from_main_once_mode(watcher_module):
     # Arrange
     args = Mock()
     args.once = True
