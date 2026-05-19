@@ -1149,11 +1149,12 @@ def test_connect_imap_logs_in_and_selects_inbox(watcher_module):
     conn.select.return_value = ("OK", [])
 
     # Act
-    with patch.object(watcher_module.imaplib, "IMAP4_SSL", return_value=conn):
+    with patch.object(watcher_module.imaplib, "IMAP4_SSL", return_value=conn) as imap_ssl:
         result = watcher_module.connect_imap(config)
 
     # Assert
     assert result is conn
+    imap_ssl.assert_called_once_with("imap.example.com", 993, timeout=20)
     conn.login.assert_called_once_with("user@example.com", "app-password")
     conn.select.assert_called_once_with("INBOX")
 
@@ -1187,7 +1188,7 @@ def test_connect_imap_raises_when_inbox_select_fails(watcher_module):
     assert str(error) == "Unable to select INBOX"
 
 
-def test_run_loop_processes_once_then_logs_out(watcher_module, tmp_path):
+def test_run_loop_stops_without_noop_after_poll_sleep(watcher_module, tmp_path):
     # Arrange
     config = watcher_module.Config(
         imap_host="imap.example.com",
@@ -1244,8 +1245,91 @@ def test_run_loop_processes_once_then_logs_out(watcher_module, tmp_path):
     asyncio.run(run_once())
 
     # Assert
-    assert conn.noop_calls == 1
+    assert conn.noop_calls == 0
     assert conn.logout_calls == 1
+
+
+def test_run_loop_reconnects_after_noop_failure(watcher_module, tmp_path):
+    # Arrange
+    config = watcher_module.Config(
+        imap_host="imap.example.com",
+        imap_port=993,
+        imap_user="user@example.com",
+        imap_password="app-password",
+        telegram_bot_token="12345:token",
+        telegram_chat_ids=["-1"],
+        telegram_recipient_aliases={},
+        poll_seconds=30,
+        state_path=tmp_path / "state.json",
+        log_level="INFO",
+    )
+
+    class DummyConn:
+        def __init__(self, fail_noop=False):
+            self.fail_noop = fail_noop
+            self.noop_calls = 0
+            self.logout_calls = 0
+
+        def noop(self):
+            self.noop_calls += 1
+            if self.fail_noop:
+                raise watcher_module.imaplib.IMAP4.error("noop failed")
+
+        def logout(self):
+            self.logout_calls += 1
+
+    first_conn = DummyConn(fail_noop=True)
+    second_conn = DummyConn()
+
+    async def run_until_reconnect():
+        stop_event = asyncio.Event()
+        sleep_seconds = []
+
+        async def stop_on_second_poll_sleep(_stop_event, seconds):
+            sleep_seconds.append(seconds)
+            if sleep_seconds == [30, 15, 30]:
+                stop_event.set()
+
+        async def direct_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.object(watcher_module.asyncio, "to_thread", new=direct_to_thread):
+            with patch.object(
+                watcher_module,
+                "connect_imap_async",
+                new=AsyncMock(side_effect=[first_conn, second_conn]),
+            ) as connect_imap_async:
+                with patch.object(
+                    watcher_module,
+                    "process_telegram_commands_async",
+                    new=AsyncMock(return_value=None),
+                ):
+                    with patch.object(
+                        watcher_module,
+                        "process_unseen_messages_async",
+                        new=AsyncMock(return_value=0),
+                    ):
+                        with patch.object(
+                            watcher_module,
+                            "wait_for_poll_interval",
+                            new=stop_on_second_poll_sleep,
+                        ):
+                            await watcher_module.run_loop_async(
+                                config, stop_event=stop_event, install_signals=False
+                            )
+
+        return connect_imap_async.await_count, sleep_seconds
+
+    # Act
+    connect_count, sleep_seconds = asyncio.run(run_until_reconnect())
+
+    # Assert
+    assert connect_count == 2
+    assert sleep_seconds == [30, 15, 30]
+    assert first_conn.noop_calls == 1
+    assert first_conn.logout_calls == 1
+    assert second_conn.noop_calls == 0
+    assert second_conn.logout_calls == 1
 
 
 def test_parse_args_reads_once_flag(watcher_module, monkeypatch):

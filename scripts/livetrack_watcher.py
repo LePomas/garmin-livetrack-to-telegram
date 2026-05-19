@@ -297,10 +297,6 @@ def post_to_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError("Telegram API returned non-ok response")
 
 
-async def post_to_telegram_async(token: str, chat_id: str, text: str) -> None:
-    await asyncio.to_thread(post_to_telegram, token, chat_id, text)
-
-
 def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, object]]:
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     params: dict[str, str] = {
@@ -320,12 +316,6 @@ def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, obj
     if not isinstance(updates, list):
         return []
     return [update for update in updates if isinstance(update, dict)]
-
-
-async def fetch_telegram_updates_async(
-    token: str, offset: int | None
-) -> list[dict[str, object]]:
-    return await asyncio.to_thread(fetch_telegram_updates, token, offset)
 
 
 def parse_telegram_command(text: str) -> str | None:
@@ -389,12 +379,6 @@ def notify_subscription_request_admins(config: Config, chat_id: str, chat_label:
     text = build_admin_subscription_request_message(chat_id, chat_label)
     for admin_chat_id in config.telegram_admin_chat_ids:
         post_to_telegram(config.telegram_bot_token, admin_chat_id, text)
-
-
-async def notify_subscription_request_admins_async(
-    config: Config, chat_id: str, chat_label: str
-) -> None:
-    await asyncio.to_thread(notify_subscription_request_admins, config, chat_id, chat_label)
 
 
 def handle_subscription_request(
@@ -553,7 +537,7 @@ async def process_unseen_messages_async(
 
 
 def connect_imap(config: Config) -> imaplib.IMAP4_SSL:
-    conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port)
+    conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=20)
     conn.login(config.imap_user, config.imap_password)
     status, _ = conn.select("INBOX")
     if status != "OK":
@@ -612,6 +596,8 @@ async def run_loop_async(
                 sent = await process_unseen_messages_async(conn, config, state)
                 LOG.debug("Scan complete; forwarded=%d", sent)
                 await wait_for_poll_interval(stop_event, config.poll_seconds)
+                if stop_event.is_set():
+                    break
                 if conn is not None:
                     await asyncio.to_thread(conn.noop)
             except (imaplib.IMAP4.error, OSError, urllib.error.URLError, RuntimeError) as exc:
