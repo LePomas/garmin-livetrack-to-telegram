@@ -4,6 +4,7 @@ This file defines how coding agents should work in this repo to avoid long disco
 
 ## Mission
 - Keep the Garmin LiveTrack watcher reliable.
+- Preserve low-resource operation for hosts like Raspberry Pi Zero 2 W.
 - Make minimal, targeted changes.
 - Validate quickly and restart the service after project file modifications.
 
@@ -12,6 +13,14 @@ This file defines how coding agents should work in this repo to avoid long disco
 - Do not edit `.env` unless explicitly requested.
 - Do not track runtime artifacts (`state/livetrack_state.json`, `.env.bak-*`).
 - Keep changes narrow: prefer one subsystem per commit.
+- Keep runtime code dependency-free unless a dependency removes clear operational risk.
+
+## Runtime Design Principles
+- Keep IMAP access and state-file writes serialized; do not parallelize operations on the same IMAP connection.
+- Keep Telegram delivery sequential for small recipient lists. Add concurrency only if measured latency or recipient count justifies the extra failure handling.
+- If using `asyncio`, use it for lifecycle control, stop-aware sleeping, and wrapping blocking network calls.
+- Avoid half-converted async wrappers that are not on the runtime path.
+- Prefer bounded timeouts and retry sleeps over tight reconnect loops.
 
 ## Fast Discovery Protocol (Use This Order)
 1. `README.md` (task context and commands)

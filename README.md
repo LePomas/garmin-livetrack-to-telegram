@@ -2,7 +2,7 @@
 
 Garmin LiveTrack Watcher polls an email inbox for Garmin LiveTrack messages and forwards the LiveTrack link to one or more Telegram chats.
 
-The project is intentionally small: one Python script, a systemd unit example, and unit tests with IMAP and Telegram calls mocked out.
+The project is intentionally small: one Python script, a systemd unit example, and unit tests with IMAP and Telegram calls mocked out. It is designed to run reliably on limited hardware such as a Raspberry Pi Zero 2 W.
 
 ## Features
 
@@ -28,7 +28,7 @@ The runtime script uses only the Python standard library. `pytest` is needed onl
 Clone the repo and create a virtual environment:
 
 ```bash
-git clone https://github.com/your-user/garmin-livetrack-watcher.git
+git clone https://github.com/LePomas/garmin-livetrack-to-telegram.git
 cd garmin-livetrack-watcher
 python3 -m venv .venv
 ./.venv/bin/python -m pip install -U pip
@@ -112,13 +112,13 @@ sudo systemctl restart garmin-livetrack-watcher.service
 
 ## Tests
 
-Run the test suite:
+Run the test suite in this checkout:
 
 ```bash
-./.venv/bin/python -m pytest -q
+./.venv-tests/bin/pytest -q
 ```
 
-Tests are unit-level and mock network boundaries. They do not connect to IMAP or Telegram.
+If you installed test dependencies into `.venv` instead, use `./.venv/bin/python -m pytest -q`. Tests are unit-level and mock network boundaries. They do not connect to IMAP or Telegram.
 
 ## Troubleshooting
 
