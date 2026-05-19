@@ -158,6 +158,18 @@ Tests fail locally:
 - `state/livetrack_state.json` may contain email message IDs and is ignored by Git.
 - Logs can include recipient aliases and message IDs. Use non-sensitive aliases.
 
+## TODO
+
+- Convert the watcher to a full async loop for Telegram polling and message delivery.
+- Keep current behavior intact:
+  - `/disable` and `/enable` still apply per chat.
+  - `/request` still records one pending request per chat and notifies admins.
+  - LiveTrack email forwarding still deduplicates by `Message-ID`.
+- Decide the async I/O approach before implementation:
+  - keep the current stdlib IMAP/HTTP code and offload blocking calls with `asyncio.to_thread`, or
+  - switch Telegram I/O to an async client and keep IMAP blocking behind threads.
+- Update tests for async command handling and loop startup/shutdown behavior.
+
 ## License
 
 MIT. See `LICENSE`.
