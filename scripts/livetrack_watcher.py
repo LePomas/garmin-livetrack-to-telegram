@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import email
 import email.policy
 import imaplib
@@ -12,7 +13,6 @@ import logging
 import os
 import re
 import signal
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -297,6 +297,10 @@ def post_to_telegram(token: str, chat_id: str, text: str) -> None:
         raise RuntimeError("Telegram API returned non-ok response")
 
 
+async def post_to_telegram_async(token: str, chat_id: str, text: str) -> None:
+    await asyncio.to_thread(post_to_telegram, token, chat_id, text)
+
+
 def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, object]]:
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     params: dict[str, str] = {
@@ -316,6 +320,12 @@ def fetch_telegram_updates(token: str, offset: int | None) -> list[dict[str, obj
     if not isinstance(updates, list):
         return []
     return [update for update in updates if isinstance(update, dict)]
+
+
+async def fetch_telegram_updates_async(
+    token: str, offset: int | None
+) -> list[dict[str, object]]:
+    return await asyncio.to_thread(fetch_telegram_updates, token, offset)
 
 
 def parse_telegram_command(text: str) -> str | None:
@@ -379,6 +389,12 @@ def notify_subscription_request_admins(config: Config, chat_id: str, chat_label:
     text = build_admin_subscription_request_message(chat_id, chat_label)
     for admin_chat_id in config.telegram_admin_chat_ids:
         post_to_telegram(config.telegram_bot_token, admin_chat_id, text)
+
+
+async def notify_subscription_request_admins_async(
+    config: Config, chat_id: str, chat_label: str
+) -> None:
+    await asyncio.to_thread(notify_subscription_request_admins, config, chat_id, chat_label)
 
 
 def handle_subscription_request(
@@ -449,6 +465,10 @@ def process_telegram_commands(config: Config, state: StateStore) -> None:
                         )
         if isinstance(update_id, int):
             state.set_telegram_update_offset(update_id + 1)
+
+
+async def process_telegram_commands_async(config: Config, state: StateStore) -> None:
+    await asyncio.to_thread(process_telegram_commands, config, state)
 
 
 def build_telegram_message(link: str, subject: str, received_at: datetime) -> str:
@@ -526,6 +546,12 @@ def process_unseen_messages(conn: imaplib.IMAP4_SSL, config: Config, state: Stat
     return sent_count
 
 
+async def process_unseen_messages_async(
+    conn: imaplib.IMAP4_SSL, config: Config, state: StateStore
+) -> int:
+    return await asyncio.to_thread(process_unseen_messages, conn, config, state)
+
+
 def connect_imap(config: Config) -> imaplib.IMAP4_SSL:
     conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port)
     conn.login(config.imap_user, config.imap_password)
@@ -535,47 +561,75 @@ def connect_imap(config: Config) -> imaplib.IMAP4_SSL:
     return conn
 
 
-def run_loop(config: Config) -> None:
-    stop = False
+async def connect_imap_async(config: Config) -> imaplib.IMAP4_SSL:
+    return await asyncio.to_thread(connect_imap, config)
 
-    def handle_signal(_signum: int, _frame: object) -> None:
-        nonlocal stop
-        stop = True
 
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+async def logout_imap_async(conn: imaplib.IMAP4_SSL) -> None:
+    try:
+        await asyncio.to_thread(conn.logout)
+    except Exception:
+        pass
+
+
+def install_stop_handlers(stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+
+    def request_stop() -> None:
+        stop_event.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, request_stop)
+        except (NotImplementedError, RuntimeError, ValueError):
+            signal.signal(signum, lambda _signum, _frame: loop.call_soon_threadsafe(request_stop))
+
+
+async def wait_for_poll_interval(stop_event: asyncio.Event, seconds: int) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
+
+
+async def run_loop_async(
+    config: Config, *, stop_event: asyncio.Event | None = None, install_signals: bool = True
+) -> None:
+    stop_event = stop_event or asyncio.Event()
+    if install_signals:
+        install_stop_handlers(stop_event)
 
     state = StateStore(config.state_path)
     conn: imaplib.IMAP4_SSL | None = None
 
-    while not stop:
-        try:
-            if conn is None:
-                conn = connect_imap(config)
-                LOG.info("Connected to IMAP server %s", config.imap_host)
-            process_telegram_commands(config, state)
-            sent = process_unseen_messages(conn, config, state)
-            LOG.debug("Scan complete; forwarded=%d", sent)
-            time.sleep(config.poll_seconds)
-            conn.noop()
-        except (imaplib.IMAP4.error, OSError, urllib.error.URLError, RuntimeError) as exc:
-            LOG.warning("Watcher error: %s", exc)
-            if conn is not None:
-                try:
-                    conn.logout()
-                except Exception:
-                    pass
-            conn = None
-            time.sleep(min(config.poll_seconds, 15))
-        except Exception:
-            LOG.exception("Unexpected error")
-            time.sleep(10)
+    try:
+        while not stop_event.is_set():
+            try:
+                if conn is None:
+                    conn = await connect_imap_async(config)
+                    LOG.info("Connected to IMAP server %s", config.imap_host)
+                await process_telegram_commands_async(config, state)
+                sent = await process_unseen_messages_async(conn, config, state)
+                LOG.debug("Scan complete; forwarded=%d", sent)
+                await wait_for_poll_interval(stop_event, config.poll_seconds)
+                if conn is not None:
+                    await asyncio.to_thread(conn.noop)
+            except (imaplib.IMAP4.error, OSError, urllib.error.URLError, RuntimeError) as exc:
+                LOG.warning("Watcher error: %s", exc)
+                if conn is not None:
+                    await logout_imap_async(conn)
+                conn = None
+                await wait_for_poll_interval(stop_event, min(config.poll_seconds, 15))
+            except Exception:
+                LOG.exception("Unexpected error")
+                await wait_for_poll_interval(stop_event, 10)
+    finally:
+        if conn is not None:
+            await logout_imap_async(conn)
 
-    if conn is not None:
-        try:
-            conn.logout()
-        except Exception:
-            pass
+
+def run_loop(config: Config) -> None:
+    asyncio.run(run_loop_async(config))
 
 
 def parse_args() -> argparse.Namespace:
@@ -584,7 +638,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+async def main_async() -> int:
     args = parse_args()
     config = Config.from_env()
     logging.basicConfig(
@@ -593,17 +647,21 @@ def main() -> int:
     )
 
     if args.once:
-        conn = connect_imap(config)
+        conn = await connect_imap_async(config)
         try:
             state = StateStore(config.state_path)
-            process_telegram_commands(config, state)
-            process_unseen_messages(conn, config, state)
+            await process_telegram_commands_async(config, state)
+            await process_unseen_messages_async(conn, config, state)
         finally:
-            conn.logout()
+            await logout_imap_async(conn)
         return 0
 
-    run_loop(config)
+    await run_loop_async(config)
     return 0
+
+
+def main() -> int:
+    return asyncio.run(main_async())
 
 
 if __name__ == "__main__":

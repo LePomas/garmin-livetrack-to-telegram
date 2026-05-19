@@ -1,10 +1,11 @@
 import email
 import email.policy
 import json
+import asyncio
 import sys
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 def test_is_garmin_livetrack_true(watcher_module, sample_message):
@@ -1200,26 +1201,51 @@ def test_run_loop_processes_once_then_logs_out(watcher_module, tmp_path):
         state_path=tmp_path / "state.json",
         log_level="INFO",
     )
-    conn = Mock()
-    handlers = {}
+    class DummyConn:
+        def __init__(self):
+            self.noop_calls = 0
+            self.logout_calls = 0
 
-    def remember_handler(signum, handler):
-        handlers[signum] = handler
+        def noop(self):
+            self.noop_calls += 1
 
-    def stop_after_sleep(_seconds):
-        handlers[watcher_module.signal.SIGTERM](watcher_module.signal.SIGTERM, None)
+        def logout(self):
+            self.logout_calls += 1
+
+    conn = DummyConn()
+
+    async def run_once():
+        stop_event = asyncio.Event()
+
+        async def stop_after_sleep(_stop_event, _seconds):
+            stop_event.set()
+
+        async def direct_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch.object(
+            watcher_module.asyncio, "to_thread", new=direct_to_thread
+        ):
+            with patch.object(watcher_module, "connect_imap_async", new=AsyncMock(return_value=conn)):
+                with patch.object(
+                    watcher_module, "process_telegram_commands_async", new=AsyncMock(return_value=None)
+                ):
+                    with patch.object(
+                        watcher_module, "process_unseen_messages_async", new=AsyncMock(return_value=0)
+                    ):
+                        with patch.object(
+                            watcher_module, "wait_for_poll_interval", new=stop_after_sleep
+                        ):
+                            await watcher_module.run_loop_async(
+                                config, stop_event=stop_event, install_signals=False
+                            )
 
     # Act
-    with patch.object(watcher_module.signal, "signal", side_effect=remember_handler):
-        with patch.object(watcher_module, "connect_imap", return_value=conn):
-            with patch.object(watcher_module, "process_telegram_commands", return_value=None):
-                with patch.object(watcher_module, "process_unseen_messages", return_value=0):
-                    with patch.object(watcher_module.time, "sleep", side_effect=stop_after_sleep):
-                        watcher_module.run_loop(config)
+    asyncio.run(run_once())
 
     # Assert
-    conn.noop.assert_called_once_with()
-    conn.logout.assert_called_once_with()
+    assert conn.noop_calls == 1
+    assert conn.logout_calls == 1
 
 
 def test_parse_args_reads_once_flag(watcher_module, monkeypatch):
@@ -1253,12 +1279,19 @@ def test_main_once_mode_returns_zero(watcher_module):
     # Act
     with patch.object(watcher_module, "parse_args", return_value=args):
         with patch.object(watcher_module.Config, "from_env", return_value=config):
-            with patch.object(watcher_module, "connect_imap") as connect_imap:
-                conn = Mock()
-                connect_imap.return_value = conn
-                with patch.object(watcher_module, "process_telegram_commands", return_value=None):
-                    with patch.object(watcher_module, "process_unseen_messages", return_value=0):
-                        result = watcher_module.main()
+            with patch.object(
+                watcher_module, "connect_imap_async", new=AsyncMock(return_value=Mock())
+            ):
+                with patch.object(
+                    watcher_module, "process_telegram_commands_async", new=AsyncMock(return_value=None)
+                ):
+                    with patch.object(
+                        watcher_module, "process_unseen_messages_async", new=AsyncMock(return_value=0)
+                    ):
+                        with patch.object(
+                            watcher_module, "logout_imap_async", new=AsyncMock()
+                        ):
+                            result = asyncio.run(watcher_module.main_async())
 
     # Assert
     assert result == 0
