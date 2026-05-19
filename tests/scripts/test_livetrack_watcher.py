@@ -550,12 +550,19 @@ def test_process_telegram_commands_disables_configured_chat(watcher_module, tmp_
     )
     state = watcher_module.StateStore(tmp_path / "state.json")
     updates = [{"update_id": 5, "message": {"text": "/disable", "chat": {"id": -1}}}]
+    sent_to = []
 
     # Act
     with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
-        watcher_module.process_telegram_commands(config, state)
+        with patch.object(
+            watcher_module,
+            "post_to_telegram",
+            side_effect=lambda _t, c, _m: sent_to.append(c),
+        ):
+            watcher_module.process_telegram_commands(config, state)
 
     # Assert
+    assert sent_to == ["-1"]
     assert state.disabled_chat_ids == ["-1"]
     assert state.telegram_update_offset == 6
 
@@ -577,12 +584,19 @@ def test_process_telegram_commands_enables_configured_chat(watcher_module, tmp_p
     state = watcher_module.StateStore(tmp_path / "state.json")
     state.disable_chat("-1")
     updates = [{"update_id": 6, "message": {"text": "/enable@GarminBot", "chat": {"id": -1}}}]
+    sent_to = []
 
     # Act
     with patch.object(watcher_module, "fetch_telegram_updates", return_value=updates):
-        watcher_module.process_telegram_commands(config, state)
+        with patch.object(
+            watcher_module,
+            "post_to_telegram",
+            side_effect=lambda _t, c, _m: sent_to.append(c),
+        ):
+            watcher_module.process_telegram_commands(config, state)
 
     # Assert
+    assert sent_to == ["-1"]
     assert state.disabled_chat_ids == []
 
 

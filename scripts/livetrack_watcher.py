@@ -355,6 +355,14 @@ def build_already_subscribed_message() -> str:
     return escape_markdown_v2("This chat is already configured for LiveTrack alerts.")
 
 
+def build_disable_confirmation_message() -> str:
+    return escape_markdown_v2("LiveTrack alerts are now disabled for this chat.")
+
+
+def build_enable_confirmation_message() -> str:
+    return escape_markdown_v2("LiveTrack alerts are now enabled for this chat.")
+
+
 def build_admin_subscription_request_message(chat_id: str, chat_label: str) -> str:
     return (
         "*New Garmin LiveTrack subscription request*\n\n"
@@ -419,12 +427,22 @@ def process_telegram_commands(config: Config, state: StateStore) -> None:
                         handle_subscription_request(config, state, chat_id, chat)
                     elif chat_id in allowed_chat_ids and command == "/disable":
                         state.disable_chat(chat_id)
+                        post_to_telegram(
+                            config.telegram_bot_token,
+                            chat_id,
+                            build_disable_confirmation_message(),
+                        )
                         LOG.info(
                             "Disabled Telegram recipient %s",
                             config.telegram_recipient_aliases.get(chat_id, chat_id),
                         )
                     elif chat_id in allowed_chat_ids and command == "/enable":
                         state.enable_chat(chat_id)
+                        post_to_telegram(
+                            config.telegram_bot_token,
+                            chat_id,
+                            build_enable_confirmation_message(),
+                        )
                         LOG.info(
                             "Enabled Telegram recipient %s",
                             config.telegram_recipient_aliases.get(chat_id, chat_id),
